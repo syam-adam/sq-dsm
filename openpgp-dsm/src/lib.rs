@@ -634,6 +634,7 @@ pub fn generate_key(
     key_flag_args: Vec<KeyFlags>,
     validity_period: Option<Duration>,
     user_id: Option<&str>,
+    group_id: Option<&str>,
     algo: Option<&str>,
     exportable: bool,
     credentials: Credentials,
@@ -675,6 +676,13 @@ pub fn generate_key(
         None => return Err(Error::msg("no User ID")),
     };
 
+    // Group ID
+    let gid = if let Some(id) = group_id {
+        Some(Uuid::parse_str(id).context("bad Group UUID")?)
+    } else {
+        None
+    };
+
     // Cipher Suite
     let algorithm = match algo {
         Some("rsa2k") => SupportedPkAlgo::Rsa(2048),
@@ -699,6 +707,14 @@ pub fn generate_key(
         validity_period
     )
     .context("could not create primary key")?;
+
+    let sobj_req = SobjectRequest {
+        group_id: gid,
+        ..Default::default()
+    };
+    dsm_client.__update_sobject(
+        &primary.uid()?, &sobj_req, "Update GroupID of primary key"
+    )?;
 
     let mut signing_subkeys: Vec<PublicKey> = vec![];
     let mut encryption_subkeys: Vec<PublicKey> = vec![];
@@ -743,6 +759,7 @@ pub fn generate_key(
     };
     let link_update_req = SobjectRequest {
         links: Some(links),
+        group_id: gid,
         ..Default::default()
     };
     info!("key generation: bind subkeys to primary key in DSM");
@@ -1121,6 +1138,7 @@ pub fn extract_tsk_from_dsm(key_name: &str, cred: Credentials) -> Result<Cert> {
 pub fn import_tsk_to_dsm(
     tsk:        ValidCert,
     key_name:   &str,
+    group_id:   Option<&str>,
     cred:       Credentials,
     exportable: bool,
 ) -> Result<()> {
@@ -1128,6 +1146,7 @@ pub fn import_tsk_to_dsm(
     fn import_constructed_sobject(
         cred:     &Credentials,
         name:     String,
+        group_id: Option<Uuid>,
         desc:     String,
         ops:      KeyOperations,
         metadata: &mut KeyMetadata,
@@ -1169,6 +1188,7 @@ pub fn import_tsk_to_dsm(
                     rsa:               rsa_opts,
                     value:             Some(value.into()),
                     deactivation_date: deact,
+                    group_id:          group_id,
                     ..Default::default()
                 }
             },
@@ -1182,6 +1202,7 @@ pub fn import_tsk_to_dsm(
                     key_ops:           Some(ops),
                     value:             Some(value.into()),
                     deactivation_date: deact,
+                    group_id:          group_id,
                     ..Default::default()
                 }
             },
@@ -1195,6 +1216,7 @@ pub fn import_tsk_to_dsm(
                     key_ops:           Some(ops),
                     value:             Some(value.into()),
                     deactivation_date: deact,
+                    group_id:          group_id,
                     ..Default::default()
                 }
             },
@@ -1210,6 +1232,7 @@ pub fn import_tsk_to_dsm(
                     key_ops:           Some(ops),
                     value:             Some(value.into()),
                     deactivation_date: deact,
+                    group_id:          group_id,
                     ..Default::default()
                 }
             },
@@ -1263,6 +1286,13 @@ pub fn import_tsk_to_dsm(
         ops
     }
 
+    // Group ID
+    let gid = if let Some(id) = group_id {
+        Some(Uuid::parse_str(id).context("bad Group UUID")?)
+    } else {
+        None
+    };
+
     let prim_key = tsk.primary_key();
     let primary = prim_key.key().clone().parts_into_secret()?;
 
@@ -1271,6 +1301,7 @@ pub fn import_tsk_to_dsm(
         .key_flags()
         .ok_or_else(|| anyhow::anyhow!("Bad input: primary has no key flags"))?;
     let prim_id = prim_key.keyid().to_hex();
+    let prim_grp_id = gid;
     let prim_name = key_name.to_string();
     let prim_desc = format!(
         "PGP primary, {}, {}", prim_id, prim_flags.human_readable()
@@ -1305,6 +1336,7 @@ pub fn import_tsk_to_dsm(
     let prim_uuid = import_constructed_sobject(
         &cred,
         prim_name,
+        prim_grp_id,
         prim_desc,
         prim_ops,
         &mut prim_metadata,
@@ -1317,6 +1349,7 @@ pub fn import_tsk_to_dsm(
         let creation_time = Timestamp::try_from(subkey.creation_time())?;
         let subkey_flags = subkey.key_flags().unwrap_or_else(KeyFlags::empty);
         let subkey_id = subkey.keyid().to_hex();
+        let subkey_grp_id = gid;
         let subkey_name = format!(
             "{} {}/{}", key_name, prim_id, subkey_id,
         ).to_string();
@@ -1353,6 +1386,7 @@ pub fn import_tsk_to_dsm(
         let subkey_uuid = import_constructed_sobject(
             &cred,
             subkey_name.clone(),
+            subkey_grp_id,
             subkey_desc,
             subkey_ops,
             &mut subkey_md,

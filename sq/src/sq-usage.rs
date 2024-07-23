@@ -479,6 +479,9 @@
 //!         --client-cert <P12-FILE>
 //!             Authenticates to Fortanix DSM with the given client certificate
 //!
+//!         --dsm-group-id <DSM-GROUP-ID>
+//!             Generate secrets inside Fortanix DSM in the given group-id
+//!
 //!         --dsm-key <DSM-KEY-NAME>
 //!             Generate secrets inside Fortanix DSM with the given name
 //!
@@ -701,6 +704,9 @@
 //!             authentication)
 //!         --client-cert <P12-FILE>
 //!             Authenticates to Fortanix DSM with the given client certificate
+//!
+//!         --dsm-group-id <DSM-GROUP-ID>
+//!             Generate secrets inside Fortanix DSM in the given group-id
 //!
 //!         --dsm-key <DSM-KEY-NAME>
 //!             Name of the DSM key
