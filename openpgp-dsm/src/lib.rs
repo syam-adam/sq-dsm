@@ -958,6 +958,7 @@ pub fn generate_key(
 pub struct DsmKeyInfo {
     name: String,
     kid: Uuid,
+    group_id: Uuid,
     object_type: ObjectType,
     created_at: SdkmsTime,
     last_used_at: SdkmsTime,
@@ -976,6 +977,8 @@ impl TryFrom<&Sobject> for DsmKeyInfo {
                 .into(),
             kid: key.kid
                 .ok_or(anyhow::anyhow!("Key ID not present"))?,
+            group_id: key.group_id
+                .ok_or(anyhow::anyhow!("GroupID not present"))?,
             object_type: key.obj_type,
             created_at: key.created_at,
             last_used_at: key.lastused_at,
@@ -1001,6 +1004,7 @@ impl DsmKeyInfo {
         format!(
             "{}:
     UUID: {}
+    GroupID: {}
     Object Type: {:?}
     Created at: {}
     Last used at: {}
@@ -1008,6 +1012,7 @@ impl DsmKeyInfo {
 ",
             self.name,
             self.kid,
+            self.group_id,
             self.object_type,
             self.created_at.to_datetime(),
             if self.last_used_at.eq(&SdkmsTime(0)) {
