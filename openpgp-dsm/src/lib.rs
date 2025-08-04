@@ -30,6 +30,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
 
 use anyhow::{Context, Error, Result};
 use http::uri::Uri;
@@ -197,6 +198,33 @@ impl Auth {
     }
 }
 
+pub fn retry_with_backoff<F, T, E>(mut operation: F) -> Result<T, E>
+where
+    F: FnMut() -> Result<T, E>,
+{
+    let retry_for = Duration::from_secs(30);
+    let start_time = SystemTime::now();
+    let mut backoff_delay = Duration::from_millis(10);
+
+    loop {
+        match operation() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let elapsed = SystemTime::now()
+                    .duration_since(start_time)
+                    .unwrap_or_else(|_| Duration::from_secs(0));
+
+                if elapsed >= retry_for {
+                    return Err(e);
+                }
+                println!("retrying");
+                sleep(backoff_delay);
+                backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Credentials {
     api_endpoint: String,
@@ -251,74 +279,154 @@ impl <S: Into<Cow<'static, str>> + Display> OperateOrAskApproval<S> for DsmClien
     fn __update_sobject(
         &self, uuid: &Uuid, req: &SobjectRequest, desc: S
     ) -> Result<Sobject> {
-        match self.update_sobject(uuid, req) {
-            Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
-                info!("Creating UPDATE approval request: {}", desc);
-                let pa = self.request_approval_to_update_sobject(
-                    uuid, req, Some(format!("sq-dsm: {}", desc))
-                )?;
-                self.__retry_until_resolved(&pa, desc)
+        let retry_for = Duration::from_secs(30);
+        let start_time = SystemTime::now();
+        let mut backoff_delay = Duration::from_millis(10);
+        loop {
+            match self.update_sobject(uuid, req) {
+                Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
+                    info!("Creating UPDATE approval request: {}", desc);
+                    let pa = self.request_approval_to_update_sobject(
+                        uuid, req, Some(format!("sq-dsm: {}", desc))
+                    )?;
+                    return self.__retry_until_resolved(&pa, desc)
+                }
+                Err(err) => {
+                    let elapsed = SystemTime::now()
+                        .duration_since(start_time)
+                        .unwrap_or_else(|_| Duration::from_secs(0));
+
+                    if elapsed >= retry_for {
+                        return Err(err.into());
+                    }
+
+                    sleep(backoff_delay);
+                    backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+                }
+                Ok(resp) => return Ok(resp),
             }
-            Err(err) => Err(err.into()),
-            Ok(resp) => Ok(resp)
         }
     }
 
     fn __sign(&self, req: &SignRequest, desc: S) -> Result<SignResponse> {
-        match self.sign(req) {
-            Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
-                info!("Creating SIGN approval request: {}", desc);
-                let pa = self.request_approval_to_sign(
-                    req, Some(format!("sq-dsm: {}", desc))
-                )?;
-                self.__retry_until_resolved(&pa, desc)
+        let retry_for = Duration::from_secs(30);
+        let start_time = SystemTime::now();
+        let mut backoff_delay = Duration::from_millis(10);
+        loop {
+            match self.sign(req) {
+                Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
+                    info!("Creating SIGN approval request: {}", desc);
+                    let pa = self.request_approval_to_sign(
+                        req, Some(format!("sq-dsm: {}", desc))
+                    )?;
+                    return self.__retry_until_resolved(&pa, desc)
+                }
+                Err(err) => {
+                    let elapsed = SystemTime::now()
+                        .duration_since(start_time)
+                        .unwrap_or_else(|_| Duration::from_secs(0));
+
+                    if elapsed >= retry_for {
+                        return Err(err.into());
+                    }
+
+                    sleep(backoff_delay);
+                    backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+                }
+                Ok(resp) => return Ok(resp)
             }
-            Err(err) => Err(err.into()),
-            Ok(resp) => Ok(resp)
         }
     }
 
     fn __decrypt(
         &self, req: &DecryptRequest, desc: S
     ) -> Result<DecryptResponse> {
-        match self.decrypt(req) {
-            Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
-                info!("Creating DECRYPT approval request: {}", desc);
-                let pa = self.request_approval_to_decrypt(
-                    req, Some(format!("sq-dsm: {}", desc))
-                )?;
-                self.__retry_until_resolved(&pa, desc)
+        let retry_for = Duration::from_secs(30);
+        let start_time = SystemTime::now();
+        let mut backoff_delay = Duration::from_millis(10);
+        loop {
+            match self.decrypt(req) {
+                Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
+                    info!("Creating DECRYPT approval request: {}", desc);
+                    let pa = self.request_approval_to_decrypt(
+                        req, Some(format!("sq-dsm: {}", desc))
+                    )?;
+                    return self.__retry_until_resolved(&pa, desc)
+                }
+                Err(err) => {
+                    let elapsed = SystemTime::now()
+                        .duration_since(start_time)
+                        .unwrap_or_else(|_| Duration::from_secs(0));
+
+                    if elapsed >= retry_for {
+                        return Err(err.into());
+                    }
+
+                    sleep(backoff_delay);
+                    backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+                }
+                Ok(resp) => return Ok(resp),
             }
-            Err(err) => Err(err.into()),
-            Ok(resp) => Ok(resp)
         }
     }
 
     fn __export_sobject(
         &self, descriptor: &SobjectDescriptor, desc: S
     ) -> Result<Sobject> {
-        match self.export_sobject(descriptor) {
-            Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
-                info!("Creating EXPORT approval request: {}", desc);
-                let pa = self.request_approval_to_export_sobject(
-                    descriptor, Some(format!("sq-dsm: {}", desc))
-                )?;
-                self.__retry_until_resolved(&pa, desc)
+        let retry_for = Duration::from_secs(30);
+        let start_time = SystemTime::now();
+        let mut backoff_delay = Duration::from_millis(10);
+        loop {
+            match self.export_sobject(descriptor) {
+                Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
+                    info!("Creating EXPORT approval request: {}", desc);
+                    let pa = self.request_approval_to_export_sobject(
+                        descriptor, Some(format!("sq-dsm: {}", desc))
+                    )?;
+                    return self.__retry_until_resolved(&pa, desc)
+                }
+                Err(err) => {
+                    let elapsed = SystemTime::now()
+                        .duration_since(start_time)
+                        .unwrap_or_else(|_| Duration::from_secs(0));
+
+                    if elapsed >= retry_for {
+                        return Err(err.into());
+                    }
+
+                    sleep(backoff_delay);
+                    backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+                }
+                Ok(resp) => return Ok(resp),
             }
-            Err(err) => Err(err.into()),
-            Ok(resp) => Ok(resp)
         }
     }
 
     fn __agree(&self, req: &AgreeKeyRequest, _desc: S) -> Result<Sobject> {
-        match self.agree(req) {
-            Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
-                // FIXME: In DSM, AGREEKEY results in a transient key which
-                // cannot be retrieved with the DSM client.
-                Err(Error::msg("Quorum approval for EC decryption unsupported"))
+        let retry_for = Duration::from_secs(30);
+        let start_time = SystemTime::now();
+        let mut backoff_delay = Duration::from_millis(10);
+        loop {
+            match self.agree(req) {
+                Err(DsmError::Forbidden(ref msg)) if msg == OP_APPROVAL_MSG => {
+                    // FIXME: In DSM, AGREEKEY results in a transient key which
+                    // cannot be retrieved with the DSM client.
+                    return Err(Error::msg("Quorum approval for EC decryption unsupported"))
+                }
+                Err(err) => {
+                        let elapsed = SystemTime::now()
+                            .duration_since(start_time)
+                            .unwrap_or_else(|_| Duration::from_secs(0));
+
+                        if elapsed >= retry_for {
+                            return Err(err.into());
+                        }
+
+                        sleep(backoff_delay);
+                        backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+                    }
+                Ok(resp) => return Ok(resp)
             }
-            Err(err) => Err(err.into()),
-            Ok(resp) => Ok(resp)
         }
     }
 }
@@ -1054,7 +1162,11 @@ pub fn dsm_key_info(cred: Credentials, key_name: &str) -> Result<Option<DsmKeyIn
         ..Default::default()
     };
 
-    let key: DsmKeyInfo = match dsm_client.list_sobjects(Some(&params))?.first() {
+    let sobjects = retry_with_backoff(|| {
+        dsm_client.list_sobjects(Some(&params))
+    })?;
+
+    let key: DsmKeyInfo = match sobjects.first() {
         Some(key) => key.try_into()?,
         None => return Err(anyhow::anyhow!("no key with name {} exists",
                                            &key_name)),
@@ -1079,7 +1191,11 @@ pub fn list_keys(cred: Credentials) -> Result<Vec<DsmKeyInfo>> {
             ..Default::default()
         };
 
-        for key_details in dsm_client.list_sobjects(Some(&params))?
+        let sobjects = retry_with_backoff(|| {
+            dsm_client.list_sobjects(Some(&params))
+        })?;
+
+        for key_details in sobjects
             .iter()
             .filter(|key|
                     match &key.custom_metadata {
@@ -1098,7 +1214,10 @@ pub fn list_keys(cred: Credentials) -> Result<Vec<DsmKeyInfo>> {
 pub fn list_groups(cred: Credentials) -> Result<Vec<Group>> {
     info!("dsm list_groups => Fetching list of groups that app belongs to");
     let dsm_client = cred.dsm_client()?;
-    Ok(dsm_client.list_groups()?)
+    let groups = retry_with_backoff(|| {
+            dsm_client.list_groups()
+        })?;
+    Ok(groups)
 }
 
 /// Extracts the certificate of the corresponding PGP key. Note that this
@@ -1119,9 +1238,12 @@ pub fn extract_cert(identifier: KeyIdentifier, cred: Credentials) -> Result<Cert
         }
     };
 
-    let sobject = dsm_client
-            .get_sobject(None, &sobject_descriptor)
-            .context(format!("could not get primary key {}", identifier))?;
+    let sobject = retry_with_backoff(|| {
+        dsm_client.get_sobject(None, &sobject_descriptor)
+        }).context(format!("could not get primary key {}", identifier))?;
+    // let sobject = dsm_client
+    //     .get_sobject(None, &sobject_descriptor)
+    //     .context(format!("could not get primary key {}", identifier))?;
     
     Cert::from_str(
         &KeyMetadata::from_sobject(&sobject)?.certificate
@@ -1373,11 +1495,15 @@ pub fn import_key_to_dsm(
             }
         }
         sobject_request.group_id = group_id;
+        let client = cred.dsm_client()?;
 
         Ok(
-            cred.dsm_client()?
-            .import_sobject(&sobject_request)
-            .context(format!("could not import secret {}", name))?
+            // cred.dsm_client()?
+            // .import_sobject(&sobject_request)
+            // .context(format!("could not import secret {}", name))?
+            retry_with_backoff(|| {
+                client.import_sobject(&sobject_request)
+            }).context(format!("could not import secret {}", name))?
             .kid
             .ok_or(anyhow::anyhow!("no UUID returned from DSM"))?
         )
@@ -1770,8 +1896,11 @@ impl PublicKey {
 
         sobject_request.group_id = group_id;
 
-        let sobject = client.create_sobject(&sobject_request)
-            .context("dsm client could not create sobject")?;
+        let sobject = retry_with_backoff(|| {
+                client.create_sobject(&sobject_request)
+            }).context("dsm client could not create sobject")?;
+        // let sobject = client.create_sobject(&sobject_request)
+        //     .context("dsm client could not create sobject")?;
 
         PublicKey::from_sobject(sobject, role)
     }
