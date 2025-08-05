@@ -193,7 +193,8 @@ impl Config {
         self
     }
 
-    /// Sets the directory containing shared state.
+    /// Sets the directory containing shared state and returns the old
+    /// home directory.
     pub fn set_home<P: AsRef<Path>>(&mut self, home: P) -> PathBuf {
         ::std::mem::replace(&mut self.0.home, PathBuf::new().join(home))
     }
@@ -204,7 +205,8 @@ impl Config {
         self
     }
 
-    /// Sets the directory containing backend servers.
+    /// Sets the directory containing backend servers and returns the
+    /// old library directory.
     pub fn set_lib<P: AsRef<Path>>(&mut self, lib: P) -> PathBuf {
         ::std::mem::replace(&mut self.0.lib, PathBuf::new().join(lib))
     }
@@ -215,7 +217,7 @@ impl Config {
         self
     }
 
-    /// Sets the IPC policy.
+    /// Sets the IPC policy and returns the old IPC policy.
     pub fn set_ipc_policy(&mut self, policy: IPCPolicy) -> IPCPolicy {
         ::std::mem::replace(&mut self.0.ipc_policy, policy)
     }
@@ -226,7 +228,8 @@ impl Config {
         self
     }
 
-    /// Makes this context ephemeral.
+    /// Makes this context ephemeral and returns the old ephemeral
+    /// state.
     pub fn set_ephemeral(&mut self) -> bool {
         ::std::mem::replace(&mut self.0.ephemeral, true)
     }
