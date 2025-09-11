@@ -8,6 +8,11 @@
 ** Notable changes
    - Our MSRV is now 1.85.
 
+** New functionality
+   - Key4::import_public_ed448
+   - Key4::import_public_x25519
+   - Key4::import_public_x448
+
 * Changes in 2.1.0
 ** Notable fixes
    - When using the OpenSSL backend, we now check at runtime what AEAD
