@@ -101,7 +101,7 @@ use crate::crypto::SessionKey;
 mod conversions;
 mod v6;
 pub use v6::Key6;
-mod v4;
+pub mod v4;
 pub use v4::Key4;
 
 /// Holds a public key, public subkey, private key or private subkey packet.

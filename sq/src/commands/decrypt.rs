@@ -167,12 +167,11 @@ impl<'a> Helper<'a> {
 
     /// Tries to decrypt the given PKESK packet with `keypair` and try
     /// to decrypt the packet parser using `decrypt`.
-    fn try_decrypt<D>(&self, pkesk: &PKESK,
+    fn try_decrypt(&self, pkesk: &PKESK,
                       sym_algo: Option<SymmetricAlgorithm>,
                       mut keypair: Box<dyn crypto::Decryptor>,
-                      decrypt: &mut D)
-                      -> Option<Option<Fingerprint>>
-        where D: FnMut(SymmetricAlgorithm, &SessionKey) -> bool
+                      decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool)
+                      -> Option<Option<Cert>>
     {
         let keyid = keypair.public().fingerprint().into();
         match pkesk.decrypt(&mut *keypair, sym_algo)
@@ -212,10 +211,10 @@ impl<'a> VerificationHelper for Helper<'a> {
 
 impl<'a> DecryptionHelper for Helper<'a> {
     #[allow(clippy::if_let_some_result)]
-    fn decrypt<D>(&mut self, pkesks: &[PKESK], skesks: &[SKESK],
-                  sym_algo: Option<SymmetricAlgorithm>,
-                  mut decrypt: D) -> openpgp::Result<Option<Fingerprint>>
-        where D: FnMut(SymmetricAlgorithm, &SessionKey) -> bool
+    fn decrypt(&mut self, pkesks: &[PKESK], skesks: &[SKESK],
+                sym_algo: Option<SymmetricAlgorithm>,
+                decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool)
+                -> openpgp::Result<Option<Cert>>
     {
         for dsm_key in &self.dsm_keys_presecrets {
             for pkesk in pkesks {

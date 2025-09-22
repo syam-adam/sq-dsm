@@ -3,6 +3,7 @@ use std::{
 };
 
 use crate::{Error, Result};
+use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use quickcheck::{Arbitrary, Gen};
@@ -36,7 +37,7 @@ use quickcheck::{Arbitrary, Gen};
 /// # Ok(()) }
 /// ```
 #[non_exhaustive]
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SymmetricAlgorithm {
     /// Null encryption.
     Unencrypted,

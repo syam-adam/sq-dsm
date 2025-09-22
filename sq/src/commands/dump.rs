@@ -705,12 +705,12 @@ impl PacketDumper {
                          i, hex::encode(m.computed_digest()))?;
             },
 
-            AED(ref a) => {
-                writeln!(output, "{}  Version: {}", i, a.version())?;
-                writeln!(output, "{}  Symmetric algo: {}", i, a.symmetric_algo())?;
-                writeln!(output, "{}  AEAD: {}", i, a.aead())?;
-                writeln!(output, "{}  Chunk size: {}", i, a.chunk_size())?;
-                writeln!(output, "{}  IV: {}", i, hex::encode(a.iv()))?;
+            Padding(ref p) => {
+                writeln!(output, "{}  Value:", i)?;
+                let mut hd = hex::Dumper::new(
+                    &mut output,
+                    self.indentation_for_hexdump(&format!("{}  ", i), 16));
+                hd.write_ascii(p.value())?;
             },
 
             // openpgp::Packet is non-exhaustive.
@@ -860,13 +860,9 @@ impl PacketDumper {
                 write!(output, "{}    Embedded signature: ", i)?,
             IssuerFingerprint(ref fp) =>
                 write!(output, "{}    Issuer Fingerprint: {}", i, fp)?,
-            PreferredAEADAlgorithms(ref c) =>
-                write!(output, "{}    AEAD preferences: {}", i,
-                       c.iter().map(|c| format!("{:?}", c))
-                       .collect::<Vec<String>>().join(", "))?,
             IntendedRecipient(ref fp) =>
                 write!(output, "{}    Intended Recipient: {}", i, fp)?,
-            AttestedCertifications(digests) => {
+            ApprovedCertifications(digests) => {
                 write!(output, "{}    Attested Certifications:", i)?;
                 if digests.is_empty() {
                     writeln!(output, " None")?;
