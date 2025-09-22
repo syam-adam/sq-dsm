@@ -210,7 +210,7 @@ pub fn encrypt(opts: EncryptOpts) -> Result<()> {
 
     // Optionally sign message.
     if ! signers.is_empty() {
-        let mut signer = Signer::new(sink, signers.pop().unwrap());
+        let mut signer = Signer::new(sink, signers.pop().unwrap())?;
         for s in signers {
             signer = signer.add_signer(s);
             if let Some(time) = opts.time {
@@ -333,7 +333,7 @@ impl<'a> VHelper<'a> {
                     continue;
                 },
                 Err(BadSignature { sig, ka, error }) => {
-                    let issuer = ka.fingerprint().to_string();
+                    let issuer = ka.key().fingerprint().to_string();
                     let what = match sig.level() {
                         0 => "checksum".into(),
                         n => format!("level {} notarizing checksum", n),
