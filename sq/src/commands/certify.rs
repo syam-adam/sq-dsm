@@ -149,7 +149,7 @@ pub fn certify(config: Config, m: &clap::ArgMatches)
             &mut signer,
             cert.primary_key().component(),
             userid)?;
-    let cert = cert.insert_packets(certification.clone())?;
+    let cert = cert.insert_packets(certification.clone())?.0;
     assert!(cert.clone().into_packets().any(|p| {
         match p {
             Packet::Signature(sig) => sig == certification,

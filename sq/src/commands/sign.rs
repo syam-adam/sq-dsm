@@ -136,7 +136,7 @@ fn sign_data(opts: SignOpts) -> Result<()> {
         return Err(anyhow::anyhow!("No signing keys found"));
     };
 
-    let mut signer = Signer::with_template(message, crypto_signer, builder);
+    let mut signer = Signer::with_template(message, crypto_signer, builder)?;
 
     for s in signing_keys {
         signer = signer.add_signer(s);
@@ -280,7 +280,7 @@ fn sign_message_(opts: SignOpts, output: &mut (dyn io::Write + Sync + Send)) -> 
                     return Err(anyhow::anyhow!("No signing keys found"));
                 };
                 let mut signer = Signer::with_template(
-                    sink, crypto_signer, builder);
+                    sink, crypto_signer, builder)?;
                 if let Some(time) = time {
                     signer = signer.creation_time(time);
                 }
