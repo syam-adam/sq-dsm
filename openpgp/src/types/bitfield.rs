@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 /// A bitfield.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub(crate) struct Bitfield {
-    pub(crate) raw: Vec<u8>,
+pub struct Bitfield {
+    raw: Vec<u8>,
 }
 
 impl From<Vec<u8>> for Bitfield {

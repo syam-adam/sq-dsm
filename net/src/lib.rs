@@ -48,6 +48,8 @@ use reqwest::{
     Url,
 };
 
+use std::fmt;
+
 use sequoia_openpgp::{
     self as openpgp,
     cert::{Cert, CertParser},
@@ -60,6 +62,7 @@ use sequoia_openpgp::{
 #[macro_use] mod macros;
 pub mod dane;
 mod email;
+pub mod pks;
 pub mod updates;
 pub mod wkd;
 
@@ -71,6 +74,88 @@ const KEYSERVER_ENCODE_SET: &AsciiSet =
     // The SKS keyserver as of version 1.1.6 is a bit picky with
     // respect to the encoding.
     .add(b'-').add(b'+').add(b'/');
+
+
+/// Network policy for Sequoia.
+///
+/// With this policy you can control how Sequoia accesses remote
+/// systems.
+#[derive(PartialEq, PartialOrd, Debug, Copy, Clone)]
+pub enum Policy {
+    /// Do not contact remote systems.
+    Offline,
+
+    /// Only contact remote systems using anonymization techniques
+    /// like TOR.
+    Anonymized,
+
+    /// Only contact remote systems using transports offering
+    /// encryption and authentication like TLS.
+    Encrypted,
+
+    /// Contact remote systems even with insecure transports.
+    Insecure,
+}
+
+impl fmt::Display for Policy {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", match self {
+            Policy::Offline    => "Offline",
+            Policy::Anonymized => "Anonymized",
+            Policy::Encrypted  => "Encrypted",
+            Policy::Insecure   => "Insecure",
+        })
+    }
+}
+
+impl Policy {
+    /// Asserts that this policy allows an action requiring policy
+    /// `action`.
+    pub fn assert(&self, action: Policy) -> Result<()> {
+        if action > *self {
+            Err(Error::PolicyViolation(action).into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<'a> From<&'a Policy> for u8 {
+    fn from(policy: &Policy) -> Self {
+        match policy {
+            Policy::Offline    => 0,
+            Policy::Anonymized => 1,
+            Policy::Encrypted  => 2,
+            Policy::Insecure   => 3,
+        }
+    }
+}
+
+impl TryFrom<u8> for Policy {
+    type Error = TryFromU8Error;
+
+    fn try_from(policy: u8) -> std::result::Result<Self, Self::Error> {
+        match policy {
+            0 => Ok(Policy::Offline),
+            1 => Ok(Policy::Anonymized),
+            2 => Ok(Policy::Encrypted),
+            3 => Ok(Policy::Insecure),
+            n => Err(TryFromU8Error(n)),
+        }
+    }
+}
+
+/// Indicates errors converting `u8` to `Policy`.
+#[derive(Debug)]
+pub struct TryFromU8Error(u8);
+
+impl fmt::Display for TryFromU8Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Bad network policy: {}", self.0)
+    }
+}
+
+impl std::error::Error for TryFromU8Error {}
 
 /// For accessing keyservers using HKP.
 #[derive(Clone)]
@@ -219,6 +304,10 @@ pub type Result<T> = ::std::result::Result<T, anyhow::Error>;
 /// Errors returned from the network routines.
 #[non_exhaustive]
 pub enum Error {
+    /// The network policy was violated by the given action.
+    #[error("Unmet network policy requirement: {0}")]
+    PolicyViolation(Policy),
+    
     /// A requested cert was not found.
     #[error("Cert not found")]
     NotFound,
@@ -233,7 +322,7 @@ pub enum Error {
     ProtocolViolation,
     /// Encountered an unexpected low-level http status.
     #[error("server returned status {0}")]
-    HttpStatus(hyper::StatusCode),
+    HttpStatus(reqwest::StatusCode),
     /// A `hyper::error::UrlError` occurred.
     #[error(transparent)]
     UrlError(#[from] url::ParseError),

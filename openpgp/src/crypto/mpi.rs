@@ -381,6 +381,14 @@ impl From<Protected> for ProtectedMPI {
     }
 }
 
+impl From<MPI> for ProtectedMPI {
+    fn from(m: MPI) -> Self {
+        ProtectedMPI {
+            value: m.value.into(),
+        }
+    }
+}
+
 impl PartialOrd for ProtectedMPI {
     fn partial_cmp(&self, other: &ProtectedMPI) -> Option<Ordering> {
         Some(self.cmp(other))
