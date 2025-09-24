@@ -81,7 +81,7 @@ fn get_signing_keys(presecrets: &[PreSecret], p: &dyn Policy,
                                                 &format!("Please enter password to decrypt {}/{}: ",
                                                     tsk, key)))
                                             .context("Reading password from tty")?;
-                                        e.decrypt(key.pk_algo(), &password.into())
+                                        e.decrypt(key, &password.into())
                                             .expect("decryption failed")
                                     },
                                     SecretKeyMaterial::Unencrypted(ref u) => u.clone(),
@@ -210,9 +210,9 @@ pub fn encrypt(opts: EncryptOpts) -> Result<()> {
 
     // Optionally sign message.
     if ! signers.is_empty() {
-        let mut signer = Signer::new(sink, signers.pop().unwrap());
+        let mut signer = Signer::new(sink, signers.pop().unwrap())?;
         for s in signers {
-            signer = signer.add_signer(s);
+            signer = signer.add_signer(s)?;
             if let Some(time) = opts.time {
                 signer = signer.creation_time(time);
             }
@@ -333,7 +333,7 @@ impl<'a> VHelper<'a> {
                     continue;
                 },
                 Err(BadSignature { sig, ka, error }) => {
-                    let issuer = ka.fingerprint().to_string();
+                    let issuer = ka.key().fingerprint().to_string();
                     let what = match sig.level() {
                         0 => "checksum".into(),
                         n => format!("level {} notarizing checksum", n),

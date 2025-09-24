@@ -189,7 +189,7 @@ impl Decryptor for PksClient {
             (mpi::Ciphertext::ECDH { e, .. }, mpi::PublicKey::ECDH { .. }) => {
                 #[allow(non_snake_case)]
                 let S = self.make_request(e.value().to_vec(), "application/vnd.pks.ecdh.point")?.into();
-                Ok(ecdh::decrypt_unwrap(&self.public, &S, ciphertext)?)
+                Ok(ecdh::decrypt_unwrap(&self.public, &S, ciphertext, _plaintext_len)?)
             },
             (ciphertext, public) => Err(anyhow::anyhow!(
                 "Unsupported combination of ciphertext {:?} \

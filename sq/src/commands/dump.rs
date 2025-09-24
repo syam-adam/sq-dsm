@@ -1,6 +1,6 @@
 use std::io::{self, Read};
 
-use sequoia_openpgp as openpgp;
+use sequoia_openpgp::{self as openpgp, KeyID};
 use self::openpgp::types::{Duration, Timestamp, SymmetricAlgorithm};
 use self::openpgp::fmt::hex;
 use self::openpgp::crypto::mpi;
@@ -106,30 +106,6 @@ pub fn dump<W>(input: &mut (dyn io::Read + Sync + Send),
                     fields.push("Decryption successful".into());
                 } else {
                     fields.push("Decryption failed".into());
-                }
-                Some(fields)
-            },
-            Packet::AED(_) if sk.is_none() => {
-                message_encrypted = true;
-                Some(vec!["No session key supplied".into()])
-            }
-            Packet::AED(_) if sk.is_some() => {
-                message_encrypted = true;
-                let sk = sk.as_ref().unwrap();
-                let algo = if let Packet::AED(ref aed) = pp.packet {
-                    aed.symmetric_algo()
-                } else {
-                    unreachable!()
-                };
-
-                let _ = pp.decrypt(algo, sk);
-
-                let mut fields = Vec::new();
-                fields.push(format!("Session key: {}", hex::encode(sk)));
-                if pp.encrypted() {
-                    fields.push("Decryption failed".into());
-                } else {
-                    fields.push("Decryption successful".into());
                 }
                 Some(fields)
             },
@@ -614,7 +590,7 @@ impl PacketDumper {
 
             PKESK(ref p) => {
                 writeln!(output, "{}  Version: {}", i, p.version())?;
-                writeln!(output, "{}  Recipient: {}", i, p.recipient())?;
+                writeln!(output, "{}  Recipient: {}", i, KeyID::from(p.recipient()))?;
                 writeln!(output, "{}  Pk algo: {}", i, p.pk_algo())?;
                 if self.mpis {
                     writeln!(output, "{}", i)?;
@@ -670,23 +646,15 @@ impl PacketDumper {
                         }
                     },
 
-                    self::openpgp::packet::SKESK::V5(ref s) => {
+                    self::openpgp::packet::SKESK::V6(ref s) => {
                         writeln!(output, "{}  Symmetric algo: {}", i,
                                  s.symmetric_algo())?;
                         writeln!(output, "{}  AEAD: {}", i,
                                  s.aead_algo())?;
                         write!(output, "{}  S2K: ", i)?;
-                        self.dump_s2k(output, i, s.s2k())?;
-                        if let Ok(iv) = s.aead_iv() {
-                            writeln!(output, "{}  IV: {}", i,
-                                     hex::encode(iv))?;
-                        }
-                        if let Ok(Some(esk)) = s.esk() {
-                            writeln!(output, "{}  ESK: {}", i,
-                                     hex::encode(esk))?;
-                        }
-                        writeln!(output, "{}  Digest: {}", i,
-                                 hex::encode(s.aead_digest()))?;
+                        self.dump_s2k(output, i, s.s2k())?; 
+                        writeln!(output, "{}  IV: {}", i, hex::encode(s.aead_iv()))?;
+                        writeln!(output, "{}  ESK: {}", i, hex::encode(s.esk()))?;
                     },
 
                     // SKESK is non-exhaustive.
@@ -705,12 +673,12 @@ impl PacketDumper {
                          i, hex::encode(m.computed_digest()))?;
             },
 
-            AED(ref a) => {
-                writeln!(output, "{}  Version: {}", i, a.version())?;
-                writeln!(output, "{}  Symmetric algo: {}", i, a.symmetric_algo())?;
-                writeln!(output, "{}  AEAD: {}", i, a.aead())?;
-                writeln!(output, "{}  Chunk size: {}", i, a.chunk_size())?;
-                writeln!(output, "{}  IV: {}", i, hex::encode(a.iv()))?;
+            Padding(ref p) => {
+                writeln!(output, "{}  Value:", i)?;
+                let mut hd = hex::Dumper::new(
+                    &mut output,
+                    self.indentation_for_hexdump(&format!("{}  ", i), 16));
+                hd.write_ascii(p.value())?;
             },
 
             // openpgp::Packet is non-exhaustive.
@@ -860,13 +828,9 @@ impl PacketDumper {
                 write!(output, "{}    Embedded signature: ", i)?,
             IssuerFingerprint(ref fp) =>
                 write!(output, "{}    Issuer Fingerprint: {}", i, fp)?,
-            PreferredAEADAlgorithms(ref c) =>
-                write!(output, "{}    AEAD preferences: {}", i,
-                       c.iter().map(|c| format!("{:?}", c))
-                       .collect::<Vec<String>>().join(", "))?,
             IntendedRecipient(ref fp) =>
                 write!(output, "{}    Intended Recipient: {}", i, fp)?,
-            AttestedCertifications(digests) => {
+            ApprovedCertifications(digests) => {
                 write!(output, "{}    Attested Certifications:", i)?;
                 if digests.is_empty() {
                     writeln!(output, " None")?;
