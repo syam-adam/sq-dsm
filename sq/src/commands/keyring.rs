@@ -96,20 +96,20 @@ pub fn dispatch(config: Config, m: &clap::ArgMatches) -> Result<()> {
                       || any_key_predicates) {
                     // If there are no filters, pass it through.
                     Some(c)
-                } else if ! (c.userids().any(|c| uid_predicate(&c))
-                             || c.user_attributes().any(|c| ua_predicate(&c))
-                             || c.keys().subkeys().any(|c| key_predicate(&c))) {
+                } else if ! (c.userids().any(|c| uid_predicate(&c.userid()))
+                             || c.user_attributes().any(|c| ua_predicate(&c.user_attribute()))
+                             || c.keys().subkeys().any(|c| key_predicate(&c.key()))) {
                     None
                 } else if m.is_present("prune-certs") {
                     let c = c
                         .retain_userids(|c| {
-                            ! any_uid_predicates || uid_predicate(&c)
+                            ! any_uid_predicates || uid_predicate(&c.userid())
                         })
                         .retain_user_attributes(|c| {
-                            ! any_ua_predicates || ua_predicate(&c)
+                            ! any_ua_predicates || ua_predicate(&c.user_attribute())
                         })
                         .retain_subkeys(|c| {
-                            ! any_key_predicates || key_predicate(&c)
+                            ! any_key_predicates || key_predicate(&c.key())
                         });
                     if c.userids().count() == 0
                         && c.user_attributes().count() == 0
@@ -323,7 +323,7 @@ fn extract_secret_dsm(m: &ArgMatches, output: &mut dyn io::Write) -> Result<()> 
                             ka.key().clone().parts_into_secret()?
                                 .encrypt_secret(&new)?.into());
                     }
-                    key = key.insert_packets(encrypted)?;
+                    key = key.insert_packets(encrypted)?.0;
                 }
 
                 key.as_tsk().serialize(output)?;
@@ -358,18 +358,18 @@ fn list(config: Config,
         // First, apply our policy.
         if let Ok(vcert) = cert.with_policy(&config.policy, None) {
             if let Ok(primary) = vcert.primary_userid() {
-                println!(" {}", String::from_utf8_lossy(primary.value()));
-                primary_uid = Some(primary.value().to_vec());
+                println!(" {}", String::from_utf8_lossy(primary.userid().value()));
+                primary_uid = Some(primary.userid().value().to_vec());
             }
         }
 
         // Second, apply the null policy.
         if primary_uid.is_none() {
-            let null = openpgp::policy::NullPolicy::new();
+            let null = unsafe { openpgp::policy::NullPolicy::new() };
             if let Ok(vcert) = cert.with_policy(&null, None) {
                 if let Ok(primary) = vcert.primary_userid() {
-                    println!(" {}", String::from_utf8_lossy(primary.value()));
-                    primary_uid = Some(primary.value().to_vec());
+                    println!(" {}", String::from_utf8_lossy(primary.userid().value()));
+                    primary_uid = Some(primary.userid().value().to_vec());
                 }
             }
         }
@@ -377,8 +377,8 @@ fn list(config: Config,
         // As a last resort, pick the first user id.
         if primary_uid.is_none() {
             if let Some(primary) = cert.userids().next() {
-                println!(" {}", String::from_utf8_lossy(primary.value()));
-                primary_uid = Some(primary.value().to_vec());
+                println!(" {}", String::from_utf8_lossy(primary.userid().value()));
+                primary_uid = Some(primary.userid().value().to_vec());
             }
         }
 
@@ -391,14 +391,14 @@ fn list(config: Config,
             // List all user ids independently of their validity.
             for u in cert.userids() {
                 if primary_uid.as_ref()
-                    .map(|p| &p[..] == u.value()).unwrap_or(false)
+                    .map(|p| &p[..] == u.userid().value()).unwrap_or(false)
                 {
                     // Skip the user id we already printed.
                     continue;
                 }
 
                 println!("{} {}", indent,
-                         String::from_utf8_lossy(u.value()));
+                         String::from_utf8_lossy(u.userid().value()));
             }
         }
     }
@@ -419,7 +419,7 @@ fn split(input: &mut (dyn io::Read + Sync + Send), prefix: &str, binary: bool)
         // Try to be more helpful by including the first userid in the
         // filename.
         let mut sink = if let Some(f) = cert.userids().next()
-            .and_then(|uid| uid.email().unwrap_or(None))
+            .and_then(|uid| uid.userid().email().unwrap_or(None))
             .and_then(to_filename_fragment)
         {
             let filename_email = format!("{}-{}", filename, f);
