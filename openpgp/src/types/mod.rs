@@ -23,7 +23,7 @@
 //!
 //! ## `KeyFlags`
 //!
-//! Holds imformation about a key in particular how the given key can be used.
+//! Holds information about a key in particular how the given key can be used.
 //!
 //! ## `RevocationKey`
 //!
@@ -51,11 +51,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use quickcheck::{Arbitrary, Gen};
 
-use crate::Error;
-use crate::Result;
-
 mod bitfield;
-pub(crate) use bitfield::Bitfield;
+pub use bitfield::Bitfield;
 mod compression_level;
 pub use compression_level::CompressionLevel;
 mod features;
@@ -70,440 +67,18 @@ mod timestamp;
 pub use timestamp::{Timestamp, Duration};
 pub(crate) use timestamp::normalize_systemtime;
 
+#[allow(dead_code)] // Used in assert_send_and_sync.
 pub(crate) trait Sendable : Send {}
+#[allow(dead_code)] // Used in assert_send_and_sync.
 pub(crate) trait Syncable : Sync {}
 
-/// The OpenPGP public key algorithms as defined in [Section 9.1 of
-/// RFC 4880], and [Section 5 of RFC 6637].
-///
-/// Note: This enum cannot be exhaustively matched to allow future
-/// extensions.
-///
-/// # Examples
-///
-/// ```rust
-/// # fn main() -> sequoia_openpgp::Result<()> {
-/// use sequoia_openpgp as openpgp;
-/// use openpgp::cert::prelude::*;
-/// use openpgp::types::PublicKeyAlgorithm;
-///
-/// let (cert, _) = CertBuilder::new()
-///     .set_cipher_suite(CipherSuite::Cv25519)
-///     .generate()?;
-///
-/// assert_eq!(cert.primary_key().pk_algo(), PublicKeyAlgorithm::EdDSA);
-/// # Ok(()) }
-/// ```
-///
-///   [Section 9.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-9.1
-///   [Section 5 of RFC 6637]: https://tools.ietf.org/html/rfc6637
-#[non_exhaustive]
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
-pub enum PublicKeyAlgorithm {
-    /// RSA (Encrypt or Sign)
-    RSAEncryptSign,
-    /// RSA Encrypt-Only, deprecated in RFC 4880.
-    #[deprecated(note = "Use `PublicKeyAlgorithm::RSAEncryptSign`.")]
-    RSAEncrypt,
-    /// RSA Sign-Only, deprecated in RFC 4880.
-    #[deprecated(note = "Use `PublicKeyAlgorithm::RSAEncryptSign`.")]
-    RSASign,
-    /// ElGamal (Encrypt-Only)
-    ElGamalEncrypt,
-    /// DSA (Digital Signature Algorithm)
-    DSA,
-    /// Elliptic curve DH
-    ECDH,
-    /// Elliptic curve DSA
-    ECDSA,
-    /// ElGamal (Encrypt or Sign), deprecated in RFC 4880.
-    #[deprecated(note = "If you really must, use \
-                         `PublicKeyAlgorithm::ElGamalEncrypt`.")]
-    ElGamalEncryptSign,
-    /// "Twisted" Edwards curve DSA
-    EdDSA,
-    /// Private algorithm identifier.
-    Private(u8),
-    /// Unknown algorithm identifier.
-    Unknown(u8),
-}
-assert_send_and_sync!(PublicKeyAlgorithm);
+pub use crate::crypto::AEADAlgorithm;
+pub use crate::crypto::Curve;
+pub use crate::crypto::HashAlgorithm;
+pub use crate::crypto::PublicKeyAlgorithm;
+pub use crate::crypto::SymmetricAlgorithm;
 
-impl PublicKeyAlgorithm {
-    /// Returns true if the algorithm can sign data.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::PublicKeyAlgorithm;
-    ///
-    /// assert!(PublicKeyAlgorithm::EdDSA.for_signing());
-    /// assert!(PublicKeyAlgorithm::RSAEncryptSign.for_signing());
-    /// assert!(!PublicKeyAlgorithm::ElGamalEncrypt.for_signing());
-    /// ```
-    pub fn for_signing(&self) -> bool {
-        use self::PublicKeyAlgorithm::*;
-        #[allow(deprecated)] {
-            matches!(self, RSAEncryptSign
-                     | RSASign
-                     | DSA
-                     | ECDSA
-                     | ElGamalEncryptSign
-                     | EdDSA
-                     | Private(_)
-                     | Unknown(_)
-            )
-        }
-    }
-
-    /// Returns true if the algorithm can encrypt data.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::PublicKeyAlgorithm;
-    ///
-    /// assert!(!PublicKeyAlgorithm::EdDSA.for_encryption());
-    /// assert!(PublicKeyAlgorithm::RSAEncryptSign.for_encryption());
-    /// assert!(PublicKeyAlgorithm::ElGamalEncrypt.for_encryption());
-    /// ```
-    pub fn for_encryption(&self) -> bool {
-        use self::PublicKeyAlgorithm::*;
-        #[allow(deprecated)] {
-            matches!(self, RSAEncryptSign
-                     | RSAEncrypt
-                     | ElGamalEncrypt
-                     | ECDH
-                     | ElGamalEncryptSign
-                     | Private(_)
-                     | Unknown(_)
-            )
-        }
-    }
-
-    /// Returns whether this algorithm is supported.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::PublicKeyAlgorithm;
-    ///
-    /// assert!(PublicKeyAlgorithm::EdDSA.is_supported());
-    /// assert!(PublicKeyAlgorithm::RSAEncryptSign.is_supported());
-    /// assert!(!PublicKeyAlgorithm::ElGamalEncrypt.is_supported());
-    /// assert!(!PublicKeyAlgorithm::Private(101).is_supported());
-    /// ```
-    pub fn is_supported(&self) -> bool {
-        self.is_supported_by_backend()
-    }
-}
-
-impl From<u8> for PublicKeyAlgorithm {
-    fn from(u: u8) -> Self {
-        use crate::PublicKeyAlgorithm::*;
-        #[allow(deprecated)]
-        match u {
-            1 => RSAEncryptSign,
-            2 => RSAEncrypt,
-            3 => RSASign,
-            16 => ElGamalEncrypt,
-            17 => DSA,
-            18 => ECDH,
-            19 => ECDSA,
-            20 => ElGamalEncryptSign,
-            22 => EdDSA,
-            100..=110 => Private(u),
-            u => Unknown(u),
-        }
-    }
-}
-
-impl From<PublicKeyAlgorithm> for u8 {
-    fn from(p: PublicKeyAlgorithm) -> u8 {
-        use crate::PublicKeyAlgorithm::*;
-        #[allow(deprecated)]
-        match p {
-            RSAEncryptSign => 1,
-            RSAEncrypt => 2,
-            RSASign => 3,
-            ElGamalEncrypt => 16,
-            DSA => 17,
-            ECDH => 18,
-            ECDSA => 19,
-            ElGamalEncryptSign => 20,
-            EdDSA => 22,
-            Private(u) => u,
-            Unknown(u) => u,
-        }
-    }
-}
-
-impl fmt::Display for PublicKeyAlgorithm {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::PublicKeyAlgorithm::*;
-        #[allow(deprecated)]
-        match *self {
-            RSAEncryptSign => f.write_str("RSA (Encrypt or Sign)"),
-            RSAEncrypt => f.write_str("RSA Encrypt-Only"),
-            RSASign => f.write_str("RSA Sign-Only"),
-            ElGamalEncrypt => f.write_str("ElGamal (Encrypt-Only)"),
-            DSA => f.write_str("DSA (Digital Signature Algorithm)"),
-            ECDSA => f.write_str("ECDSA public key algorithm"),
-            ElGamalEncryptSign => f.write_str("ElGamal (Encrypt or Sign)"),
-            ECDH => f.write_str("ECDH public key algorithm"),
-            EdDSA => f.write_str("EdDSA Edwards-curve Digital Signature Algorithm"),
-            Private(u) =>
-                f.write_fmt(format_args!("Private/Experimental public key algorithm {}", u)),
-            Unknown(u) =>
-                f.write_fmt(format_args!("Unknown public key algorithm {}", u)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Arbitrary for PublicKeyAlgorithm {
-    fn arbitrary(g: &mut Gen) -> Self {
-        u8::arbitrary(g).into()
-    }
-}
-
-#[cfg(test)]
-impl PublicKeyAlgorithm {
-    pub(crate) fn arbitrary_for_signing(g: &mut Gen) -> Self {
-        use self::PublicKeyAlgorithm::*;
-
-        #[allow(deprecated)]
-        let a = g.choose(&[RSAEncryptSign, RSASign, DSA, ECDSA, EdDSA]).unwrap();
-        assert!(a.for_signing());
-        *a
-    }
-}
-
-/// Elliptic curves used in OpenPGP.
-///
-/// `PublicKeyAlgorithm` does not differentiate between elliptic
-/// curves.  Instead, the curve is specified using an OID prepended to
-/// the key material.  We provide this type to be able to match on the
-/// curves.
-///
-/// Note: This enum cannot be exhaustively matched to allow future
-/// extensions.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Curve {
-    /// NIST curve P-256.
-    NistP256,
-    /// NIST curve P-384.
-    NistP384,
-    /// NIST curve P-521.
-    NistP521,
-    /// brainpoolP256r1.
-    BrainpoolP256,
-    /// brainpoolP512r1.
-    BrainpoolP512,
-    /// D.J. Bernstein's "Twisted" Edwards curve Ed25519.
-    Ed25519,
-    /// Elliptic curve Diffie-Hellman using D.J. Bernstein's Curve25519.
-    Cv25519,
-    /// Unknown curve.
-    Unknown(Box<[u8]>),
-}
-assert_send_and_sync!(Curve);
-
-impl Curve {
-    /// Returns the length of public keys over this curve in bits.
-    ///
-    /// For the Kobliz curves this is the size of the underlying
-    /// finite field.  For X25519 it is 256.
-    ///
-    /// Note: This information is useless and should not be used to
-    /// gauge the security of a particular curve. This function exists
-    /// only because some legacy PGP application like HKP need it.
-    ///
-    /// Returns `None` for unknown curves.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::Curve;
-    ///
-    /// assert_eq!(Curve::NistP256.bits(), Some(256));
-    /// assert_eq!(Curve::NistP384.bits(), Some(384));
-    /// assert_eq!(Curve::Ed25519.bits(), Some(256));
-    /// assert_eq!(Curve::Unknown(Box::new([0x2B, 0x11])).bits(), None);
-    /// ```
-    pub fn bits(&self) -> Option<usize> {
-        use self::Curve::*;
-
-        match self {
-            NistP256 => Some(256),
-            NistP384 => Some(384),
-            NistP521 => Some(521),
-            BrainpoolP256 => Some(256),
-            BrainpoolP512 => Some(512),
-            Ed25519 => Some(256),
-            Cv25519 => Some(256),
-            Unknown(_) => None,
-        }
-    }
-}
-
-impl fmt::Display for Curve {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::Curve::*;
-        match *self {
-            NistP256 => f.write_str("NIST curve P-256"),
-            NistP384 => f.write_str("NIST curve P-384"),
-            NistP521 => f.write_str("NIST curve P-521"),
-            BrainpoolP256 => f.write_str("brainpoolP256r1"),
-            BrainpoolP512 => f.write_str("brainpoolP512r1"),
-            Ed25519
-                => f.write_str("D.J. Bernstein's \"Twisted\" Edwards curve Ed25519"),
-            Cv25519
-                => f.write_str("Elliptic curve Diffie-Hellman using D.J. Bernstein's Curve25519"),
-            Unknown(ref oid)
-             => write!(f, "Unknown curve (OID: {:?})", oid),
-        }
-    }
-}
-
-const NIST_P256_OID: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
-const NIST_P384_OID: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
-const NIST_P521_OID: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x23];
-const BRAINPOOL_P256_OID: &[u8] =
-    &[0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07];
-const BRAINPOOL_P512_OID: &[u8] =
-    &[0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0D];
-const ED25519_OID: &[u8] =
-    &[0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01];
-const CV25519_OID: &[u8] =
-    &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01, 0x05, 0x01];
-
-#[allow(clippy::len_without_is_empty)]
-impl Curve {
-    /// Parses the given OID.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::Curve;
-    ///
-    /// assert_eq!(Curve::from_oid(&[0x2B, 0x81, 0x04, 0x00, 0x22]), Curve::NistP384);
-    /// assert_eq!(Curve::from_oid(&[0x2B, 0x11]), Curve::Unknown(Box::new([0x2B, 0x11])));
-    /// ```
-    pub fn from_oid(oid: &[u8]) -> Curve {
-        // Match on OIDs, see section 11 of RFC6637.
-        match oid {
-            NIST_P256_OID => Curve::NistP256,
-            NIST_P384_OID => Curve::NistP384,
-            NIST_P521_OID => Curve::NistP521,
-            BRAINPOOL_P256_OID => Curve::BrainpoolP256,
-            BRAINPOOL_P512_OID => Curve::BrainpoolP512,
-            ED25519_OID => Curve::Ed25519,
-            CV25519_OID => Curve::Cv25519,
-            oid => Curve::Unknown(Vec::from(oid).into_boxed_slice()),
-        }
-    }
-
-    /// Returns this curve's OID.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::Curve;
-    ///
-    /// assert_eq!(Curve::NistP384.oid(), &[0x2B, 0x81, 0x04, 0x00, 0x22]);
-    /// assert_eq!(Curve::Unknown(Box::new([0x2B, 0x11])).oid(), &[0x2B, 0x11]);
-    /// ```
-    pub fn oid(&self) -> &[u8] {
-        match self {
-            Curve::NistP256 => NIST_P256_OID,
-            Curve::NistP384 => NIST_P384_OID,
-            Curve::NistP521 => NIST_P521_OID,
-            Curve::BrainpoolP256 => BRAINPOOL_P256_OID,
-            Curve::BrainpoolP512 => BRAINPOOL_P512_OID,
-            Curve::Ed25519 => ED25519_OID,
-            Curve::Cv25519 => CV25519_OID,
-            Curve::Unknown(ref oid) => oid,
-        }
-    }
-
-    /// Returns the length of a coordinate in bits.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::Curve;
-    ///
-    /// assert!(if let Ok(256) = Curve::NistP256.len() { true } else { false });
-    /// assert!(if let Ok(384) = Curve::NistP384.len() { true } else { false });
-    /// assert!(if let Ok(256) = Curve::Ed25519.len() { true } else { false });
-    /// assert!(if let Err(_) = Curve::Unknown(Box::new([0x2B, 0x11])).len() { true } else { false });
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::UnsupportedEllipticCurve` if the curve is not
-    /// supported.
-    pub fn len(&self) -> Result<usize> {
-        match self {
-            Curve::NistP256 => Ok(256),
-            Curve::NistP384 => Ok(384),
-            Curve::NistP521 => Ok(521),
-            Curve::BrainpoolP256 => Ok(256),
-            Curve::BrainpoolP512 => Ok(512),
-            Curve::Ed25519 => Ok(256),
-            Curve::Cv25519 => Ok(256),
-            Curve::Unknown(_) =>
-                Err(Error::UnsupportedEllipticCurve(self.clone())
-                    .into()),
-        }
-    }
-
-    /// Returns whether this algorithm is supported.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::Curve;
-    ///
-    /// assert!(Curve::Ed25519.is_supported());
-    /// assert!(!Curve::Unknown(Box::new([0x2B, 0x11])).is_supported());
-    /// ```
-    pub fn is_supported(&self) -> bool {
-        self.is_supported_by_backend()
-    }
-}
-
-#[cfg(test)]
-impl Arbitrary for Curve {
-    fn arbitrary(g: &mut Gen) -> Self {
-        match u8::arbitrary(g) % 8 {
-            0 => Curve::NistP256,
-            1 => Curve::NistP384,
-            2 => Curve::NistP521,
-            3 => Curve::BrainpoolP256,
-            4 => Curve::BrainpoolP512,
-            5 => Curve::Ed25519,
-            6 => Curve::Cv25519,
-            7 => Curve::Unknown({
-                let mut k = <Vec<u8>>::arbitrary(g);
-                k.truncate(255);
-                k.into_boxed_slice()
-            }),
-            _ => unreachable!(),
-        }
-    }
-}
-
-/// The symmetric-key algorithms as defined in [Section 9.2 of RFC 4880].
+/// The OpenPGP compression algorithms as defined in [Section 9.4 of RFC 9580].
 ///
 ///   [Section 9.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-9.2
 ///
@@ -799,11 +374,11 @@ pub enum CompressionAlgorithm {
     Uncompressed,
     /// DEFLATE Compressed Data.
     ///
-    /// See [RFC 1951] for details.  [Section 9.3 of RFC 4880]
+    /// See [RFC 1951] for details.  [Section 9.4 of RFC 9580]
     /// recommends that this algorithm should be implemented.
     ///
     /// [RFC 1951]: https://tools.ietf.org/html/rfc1951
-    /// [Section 9.3 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-9.3
+    /// [Section 9.4 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-9.4
     Zip,
     /// ZLIB Compressed Data.
     ///
@@ -819,6 +394,13 @@ pub enum CompressionAlgorithm {
     Unknown(u8),
 }
 assert_send_and_sync!(CompressionAlgorithm);
+
+const COMPRESSION_ALGORITHM_VARIANTS: [CompressionAlgorithm; 4] = [
+    CompressionAlgorithm::Uncompressed,
+    CompressionAlgorithm::Zip,
+    CompressionAlgorithm::Zlib,
+    CompressionAlgorithm::BZip2,
+];
 
 impl Default for CompressionAlgorithm {
     fn default() -> Self {
@@ -844,7 +426,6 @@ impl CompressionAlgorithm {
     /// use openpgp::types::CompressionAlgorithm;
     ///
     /// assert!(CompressionAlgorithm::Uncompressed.is_supported());
-    /// assert!(CompressionAlgorithm::Zip.is_supported());
     ///
     /// assert!(!CompressionAlgorithm::Private(101).is_supported());
     /// ```
@@ -858,6 +439,15 @@ impl CompressionAlgorithm {
             BZip2 => true,
             _ => false,
         }
+    }
+
+    /// Returns an iterator over all valid variants.
+    ///
+    /// Returns an iterator over all known variants.  This does not
+    /// include the [`CompressionAlgorithm::Private`], or
+    /// [`CompressionAlgorithm::Unknown`] variants.
+    pub fn variants() -> impl Iterator<Item=Self> {
+        COMPRESSION_ALGORITHM_VARIANTS.iter().cloned()
     }
 }
 
@@ -897,7 +487,7 @@ impl fmt::Display for CompressionAlgorithm {
             CompressionAlgorithm::Private(u) =>
                 f.write_fmt(format_args!("Private/Experimental compression algorithm {}", u)),
             CompressionAlgorithm::Unknown(u) =>
-                f.write_fmt(format_args!("Unknown comppression algorithm {}", u)),
+                f.write_fmt(format_args!("Unknown compression algorithm {}", u)),
         }
     }
 }
@@ -1120,14 +710,14 @@ pub enum SignatureType {
     /// Positive certification of a User ID and Public-Key packet.
     PositiveCertification,
 
-    /// Attestation Key Signature (proposed).
+    /// Certification Approval Key Signature (experimental).
     ///
     /// Allows the certificate owner to attest to third party
-    /// certifications. See [Section 5.2.3.30 of RFC 4880bis] for
+    /// certifications. See [Certification Approval Key Signature] for
     /// details.
     ///
-    ///   [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
-    AttestationKey,
+    ///   [Certification Approval Key Signature]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#name-certification-approval-key-
+    CertificationApproval,
 
     /// Subkey Binding Signature
     SubkeyBinding,
@@ -1153,6 +743,24 @@ pub enum SignatureType {
 }
 assert_send_and_sync!(SignatureType);
 
+const SIGNATURE_TYPE_VARIANTS: [SignatureType; 16] = [
+    SignatureType::Binary,
+    SignatureType::Text,
+    SignatureType::Standalone,
+    SignatureType::GenericCertification,
+    SignatureType::PersonaCertification,
+    SignatureType::CasualCertification,
+    SignatureType::PositiveCertification,
+    SignatureType::CertificationApproval,
+    SignatureType::SubkeyBinding,
+    SignatureType::PrimaryKeyBinding,
+    SignatureType::DirectKey,
+    SignatureType::KeyRevocation,
+    SignatureType::SubkeyRevocation,
+    SignatureType::CertificationRevocation,
+    SignatureType::Timestamp,
+    SignatureType::Confirmation,
+];
 
 impl From<u8> for SignatureType {
     fn from(u: u8) -> Self {
@@ -1164,7 +772,7 @@ impl From<u8> for SignatureType {
             0x11 => SignatureType::PersonaCertification,
             0x12 => SignatureType::CasualCertification,
             0x13 => SignatureType::PositiveCertification,
-            0x16 => SignatureType::AttestationKey,
+            0x16 => SignatureType::CertificationApproval,
             0x18 => SignatureType::SubkeyBinding,
             0x19 => SignatureType::PrimaryKeyBinding,
             0x1f => SignatureType::DirectKey,
@@ -1188,7 +796,7 @@ impl From<SignatureType> for u8 {
             SignatureType::PersonaCertification => 0x11,
             SignatureType::CasualCertification => 0x12,
             SignatureType::PositiveCertification => 0x13,
-            SignatureType::AttestationKey => 0x16,
+            SignatureType::CertificationApproval => 0x16,
             SignatureType::SubkeyBinding => 0x18,
             SignatureType::PrimaryKeyBinding => 0x19,
             SignatureType::DirectKey => 0x1f,
@@ -1219,8 +827,8 @@ impl fmt::Display for SignatureType {
                 f.write_str("CasualCertification"),
             SignatureType::PositiveCertification =>
                 f.write_str("PositiveCertification"),
-            SignatureType::AttestationKey =>
-                f.write_str("AttestationKey"),
+            SignatureType::CertificationApproval =>
+                f.write_str("CertificationApproval"),
             SignatureType::SubkeyBinding =>
                 f.write_str("SubkeyBinding"),
             SignatureType::PrimaryKeyBinding =>
@@ -1250,14 +858,21 @@ impl Arbitrary for SignatureType {
     }
 }
 
+impl SignatureType {
+    /// Returns an iterator over all valid variants.
+    ///
+    /// Returns an iterator over all known variants.  This does not
+    /// include the [`SignatureType::Unknown`] variants.
+    pub fn variants() -> impl Iterator<Item=Self> {
+        SIGNATURE_TYPE_VARIANTS.iter().cloned()
+    }
+}
+
 /// Describes the reason for a revocation.
 ///
-/// See the description of revocation subpackets [Section 5.2.3.23 of RFC 4880].
+/// See the description of revocation subpackets [Section 5.2.3.31 of RFC 9580].
 ///
-///   [Section 5.2.3.23 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.23
-///
-/// Note: This enum cannot be exhaustively matched to allow future
-/// extensions.
+///   [Section 5.2.3.31 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.31
 ///
 /// # Examples
 ///
@@ -1292,7 +907,7 @@ impl Arbitrary for SignatureType {
 /// let cert = cert.insert_packets(revocation.clone())?;
 ///
 /// // Check that it is revoked.
-/// let ca = cert.userids().nth(0).unwrap();
+/// let ca = cert.0.userids().nth(0).unwrap();
 /// let status = ca.with_policy(p, None)?.revocation_status();
 /// if let RevocationStatus::Revoked(revs) = status {
 ///     assert_eq!(revs.len(), 1);
@@ -1332,6 +947,14 @@ pub enum ReasonForRevocation {
     Unknown(u8),
 }
 assert_send_and_sync!(ReasonForRevocation);
+
+const REASON_FOR_REVOCATION_VARIANTS: [ReasonForRevocation; 5] = [
+    ReasonForRevocation::Unspecified,
+    ReasonForRevocation::KeySuperseded,
+    ReasonForRevocation::KeyCompromised,
+    ReasonForRevocation::KeyRetired,
+    ReasonForRevocation::UIDRetired,
+];
 
 impl From<u8> for ReasonForRevocation {
     fn from(u: u8) -> Self {
@@ -1398,8 +1021,8 @@ impl Arbitrary for ReasonForRevocation {
 /// or soft.
 ///
 /// A hard revocation is a revocation that indicates that the key was
-/// somehow compromised, and the provence of *all* artifacts should be
-/// called into question.
+/// somehow compromised, and the provenance of *all* artifacts should
+/// be called into question.
 ///
 /// A soft revocation is a revocation that indicates that the key
 /// should be considered invalid *after* the revocation signature's
@@ -1427,7 +1050,7 @@ impl Arbitrary for ReasonForRevocation {
 ///
 /// let t0 = SystemTime::now();
 /// let (cert, _) =
-///     CertBuilder::general_purpose(None, Some("alice@example.org"))
+///     CertBuilder::general_purpose(Some("alice@example.org"))
 ///     .set_creation_time(t0)
 ///     .generate()?;
 ///
@@ -1444,7 +1067,7 @@ impl Arbitrary for ReasonForRevocation {
 ///     .build(&mut signer, &cert, None)?;
 ///
 /// let t1 = t0 + Duration::from_secs(1200);
-/// let cert1 = cert.clone().insert_packets(sig.clone())?;
+/// let cert1 = cert.clone().insert_packets(sig.clone())?.0;
 /// assert_eq!(cert1.revocation_status(p, Some(t1)),
 ///            RevocationStatus::Revoked(vec![&sig.into()]));
 ///
@@ -1456,7 +1079,7 @@ impl Arbitrary for ReasonForRevocation {
 ///     .build(&mut signer, &cert, None)?;
 ///
 /// let t1 = t0 + Duration::from_secs(1200);
-/// let cert2 = cert.clone().insert_packets(sig.clone())?;
+/// let cert2 = cert.clone().insert_packets(sig.clone())?.0;
 /// assert_eq!(cert2.revocation_status(p, Some(t1)),
 ///            RevocationStatus::NotAsFarAsWeKnow);
 /// #     Ok(())
@@ -1508,16 +1131,22 @@ impl ReasonForRevocation {
             ReasonForRevocation::Unknown(_) => RevocationType::Hard,
         }
     }
+
+    /// Returns an iterator over all valid variants.
+    ///
+    /// Returns an iterator over all known variants.  This does not
+    /// include the [`ReasonForRevocation::Private`] or
+    /// [`ReasonForRevocation::Unknown`] variants.
+    pub fn variants() -> impl Iterator<Item=Self> {
+        REASON_FOR_REVOCATION_VARIANTS.iter().cloned()
+    }
 }
 
 /// Describes the format of the body of a literal data packet.
 ///
-/// See the description of literal data packets [Section 5.9 of RFC 4880].
+/// See the description of literal data packets [Section 5.9 of RFC 9580].
 ///
-///   [Section 5.9 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.9
-///
-/// Note: This enum cannot be exhaustively matched to allow future
-/// extensions.
+///   [Section 5.9 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.9
 ///
 /// # Examples
 ///
@@ -1533,7 +1162,7 @@ impl ReasonForRevocation {
 /// use openpgp::message::Message;
 ///
 /// let mut packets = Vec::new();
-/// let mut lit = Literal::new(DataFormat::Text);
+/// let mut lit = Literal::new(DataFormat::Unicode);
 /// lit.set_body(b"data".to_vec());
 /// packets.push(lit.into());
 ///
@@ -1548,28 +1177,29 @@ pub enum DataFormat {
     /// This is a hint that the content is probably binary data.
     Binary,
 
-    /// Text data.
-    ///
-    /// This is a hint that the content is probably text; the encoding
-    /// is not specified.
-    Text,
-
     /// Text data, probably valid UTF-8.
     ///
     /// This is a hint that the content is probably UTF-8 encoded.
     Unicode,
 
-    /// MIME message.
+    /// Text data.
     ///
-    /// This is defined in [Section 5.10 of RFC4880bis].
-    ///
-    ///   [Section 5.10 of RFC4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-05#section-5.10
-    MIME,
+    /// This is a hint that the content is probably text; the encoding
+    /// is not specified.
+    #[deprecated(note = "Use Dataformat::Unicode instead.")]
+    Text,
 
     /// Unknown format specifier.
-    Unknown(char),
+    Unknown(u8),
 }
 assert_send_and_sync!(DataFormat);
+
+#[allow(deprecated)]
+const DATA_FORMAT_VARIANTS: [DataFormat; 3] = [
+    DataFormat::Binary,
+    DataFormat::Text,
+    DataFormat::Unicode,
+];
 
 impl Default for DataFormat {
     fn default() -> Self {
@@ -1579,37 +1209,24 @@ impl Default for DataFormat {
 
 impl From<u8> for DataFormat {
     fn from(u: u8) -> Self {
-        (u as char).into()
-    }
-}
-
-impl From<char> for DataFormat {
-    fn from(c: char) -> Self {
-        use self::DataFormat::*;
-        match c {
-            'b' => Binary,
-            't' => Text,
-            'u' => Unicode,
-            'm' => MIME,
-            c => Unknown(c),
+        #[allow(deprecated)]
+        match u {
+            b'b' => DataFormat::Binary,
+            b'u' => DataFormat::Unicode,
+            b't' => DataFormat::Text,
+            _ => DataFormat::Unknown(u),
         }
     }
 }
 
 impl From<DataFormat> for u8 {
     fn from(f: DataFormat) -> u8 {
-        char::from(f) as u8
-    }
-}
-
-impl From<DataFormat> for char {
-    fn from(f: DataFormat) -> char {
         use self::DataFormat::*;
         match f {
-            Binary => 'b',
-            Text => 't',
-            Unicode => 'u',
-            MIME => 'm',
+            Binary => b'b',
+            Unicode => b'u',
+            #[allow(deprecated)]
+            Text => b't',
             Unknown(c) => c,
         }
     }
@@ -1621,12 +1238,11 @@ impl fmt::Display for DataFormat {
         match *self {
             Binary =>
                 f.write_str("Binary data"),
+            #[allow(deprecated)]
             Text =>
                 f.write_str("Text data"),
             Unicode =>
                 f.write_str("Text data (UTF-8)"),
-            MIME =>
-                f.write_str("MIME message body part"),
             Unknown(c) =>
                 f.write_fmt(format_args!(
                     "Unknown data format identifier {:?}", c)),
@@ -1638,6 +1254,16 @@ impl fmt::Display for DataFormat {
 impl Arbitrary for DataFormat {
     fn arbitrary(g: &mut Gen) -> Self {
         u8::arbitrary(g).into()
+    }
+}
+
+impl DataFormat {
+    /// Returns an iterator over all valid variants.
+    ///
+    /// Returns an iterator over all known variants.  This does not
+    /// include the [`DataFormat::Unknown`] variants.
+    pub fn variants() -> impl Iterator<Item=Self> {
+        DATA_FORMAT_VARIANTS.iter().cloned()
     }
 }
 
@@ -1660,7 +1286,7 @@ impl Arbitrary for DataFormat {
 /// let p = &StandardPolicy::new();
 ///
 /// let (cert, _) =
-///     CertBuilder::general_purpose(None, Some("alice@example.org"))
+///     CertBuilder::general_purpose(Some("alice@example.org"))
 ///     .generate()?;
 /// let cert = cert.with_policy(p, None)?;
 /// let ua = cert.userids().nth(0).expect("User IDs");
@@ -1731,94 +1357,6 @@ mod tests {
 
 
     quickcheck! {
-        fn sym_roundtrip(sym: SymmetricAlgorithm) -> bool {
-            let val: u8 = sym.into();
-            sym == SymmetricAlgorithm::from(val)
-        }
-    }
-
-    quickcheck! {
-        fn sym_display(sym: SymmetricAlgorithm) -> bool {
-            let s = format!("{}", sym);
-            !s.is_empty()
-        }
-    }
-
-    quickcheck! {
-        fn sym_parse(sym: SymmetricAlgorithm) -> bool {
-            match sym {
-                SymmetricAlgorithm::Unknown(u) =>
-                    u == 5 || u == 6 || u > 110 || (u > 10 && u < 100),
-                SymmetricAlgorithm::Private(u) =>
-                    (100..=110).contains(&u),
-                _ => true
-            }
-        }
-    }
-
-
-    quickcheck! {
-        fn aead_roundtrip(aead: AEADAlgorithm) -> bool {
-            let val: u8 = aead.into();
-            aead == AEADAlgorithm::from(val)
-        }
-    }
-
-    quickcheck! {
-        fn aead_display(aead: AEADAlgorithm) -> bool {
-            let s = format!("{}", aead);
-            !s.is_empty()
-        }
-    }
-
-    quickcheck! {
-        fn aead_parse(aead: AEADAlgorithm) -> bool {
-            match aead {
-                AEADAlgorithm::Unknown(u) =>
-                    u == 0 || u > 110 || (u > 2 && u < 100),
-                AEADAlgorithm::Private(u) =>
-                    (100..=110).contains(&u),
-                _ => true
-            }
-        }
-    }
-
-
-    quickcheck! {
-        fn pk_roundtrip(pk: PublicKeyAlgorithm) -> bool {
-            let val: u8 = pk.into();
-            pk == PublicKeyAlgorithm::from(val)
-        }
-    }
-
-    quickcheck! {
-        fn pk_display(pk: PublicKeyAlgorithm) -> bool {
-            let s = format!("{}", pk);
-            !s.is_empty()
-        }
-    }
-
-    quickcheck! {
-        fn pk_parse(pk: PublicKeyAlgorithm) -> bool {
-            match pk {
-                PublicKeyAlgorithm::Unknown(u) =>
-                    u == 0 || u > 110 || (4..=15).contains(&u)
-                    || (18..100).contains(&u),
-                PublicKeyAlgorithm::Private(u) => (100..=110).contains(&u),
-                _ => true
-            }
-        }
-    }
-
-
-    quickcheck! {
-        fn curve_roundtrip(curve: Curve) -> bool {
-            curve == Curve::from_oid(curve.oid())
-        }
-    }
-
-
-    quickcheck! {
         fn signature_type_roundtrip(t: SignatureType) -> bool {
             let val: u8 = t.into();
             t == SignatureType::from(val)
@@ -1832,55 +1370,6 @@ mod tests {
         }
     }
 
-
-    quickcheck! {
-        fn hash_roundtrip(hash: HashAlgorithm) -> bool {
-            let val: u8 = hash.into();
-            hash == HashAlgorithm::from(val)
-        }
-    }
-
-    quickcheck! {
-        fn hash_roundtrip_str(hash: HashAlgorithm) -> bool {
-            match hash {
-                HashAlgorithm::Private(_) | HashAlgorithm::Unknown(_) => true,
-                hash => {
-                    let s = format!("{}", hash);
-                    hash == HashAlgorithm::from_str(&s).unwrap()
-                }
-            }
-        }
-    }
-
-    quickcheck! {
-        fn hash_roundtrip_text_name(hash: HashAlgorithm) -> bool {
-            match hash {
-                HashAlgorithm::Private(_) | HashAlgorithm::Unknown(_) => true,
-                hash => {
-                    let s = hash.text_name().unwrap();
-                    hash == HashAlgorithm::from_str(s).unwrap()
-                }
-            }
-        }
-    }
-
-    quickcheck! {
-        fn hash_display(hash: HashAlgorithm) -> bool {
-            let s = format!("{}", hash);
-            !s.is_empty()
-        }
-    }
-
-    quickcheck! {
-        fn hash_parse(hash: HashAlgorithm) -> bool {
-            match hash {
-                HashAlgorithm::Unknown(u) => u == 0 || (u > 11 && u < 100) ||
-                    u > 110 || (4..=7).contains(&u) || u == 0,
-                HashAlgorithm::Private(u) => (100..=110).contains(&u),
-                _ => true
-            }
-        }
-    }
 
     quickcheck! {
         fn rfr_roundtrip(rfr: ReasonForRevocation) -> bool {
@@ -1928,9 +1417,123 @@ mod tests {
         fn df_parse(df: DataFormat) -> bool {
             match df {
                 DataFormat::Unknown(u) =>
-                    u != 'b' && u != 't' && u != 'u' && u != 'm',
+                    u != b'b' && u != b't' && u != b'u',
                 _ => true
             }
         }
+    }
+
+    #[test]
+    fn compression_algorithms_variants() {
+        use std::collections::HashSet;
+        use std::iter::FromIterator;
+
+        // COMPRESSION_ALGORITHM_VARIANTS is a list.  Derive it in a
+        // different way to double check that nothing is missing.
+        let derived_variants = (0..=u8::MAX)
+            .map(CompressionAlgorithm::from)
+            .filter(|t| {
+                match t {
+                    CompressionAlgorithm::Private(_) => false,
+                    CompressionAlgorithm::Unknown(_) => false,
+                    _ => true,
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        let known_variants
+            = HashSet::from_iter(COMPRESSION_ALGORITHM_VARIANTS
+                                 .iter().cloned());
+
+        let missing = known_variants
+            .symmetric_difference(&derived_variants)
+            .collect::<Vec<_>>();
+
+        assert!(missing.is_empty(), "{:?}", missing);
+    }
+
+    #[test]
+    fn signature_types_variants() {
+        use std::collections::HashSet;
+        use std::iter::FromIterator;
+
+        // SIGNATURE_TYPE_VARIANTS is a list.  Derive it in a
+        // different way to double check that nothing is missing.
+        let derived_variants = (0..=u8::MAX)
+            .map(SignatureType::from)
+            .filter(|t| {
+                match t {
+                    SignatureType::Unknown(_) => false,
+                    _ => true,
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        let known_variants
+            = HashSet::from_iter(SIGNATURE_TYPE_VARIANTS
+                                 .iter().cloned());
+
+        let missing = known_variants
+            .symmetric_difference(&derived_variants)
+            .collect::<Vec<_>>();
+
+        assert!(missing.is_empty(), "{:?}", missing);
+    }
+
+    #[test]
+    fn reason_for_revocation_variants() {
+        use std::collections::HashSet;
+        use std::iter::FromIterator;
+
+        // REASON_FOR_REVOCATION_VARIANTS is a list.  Derive it in a
+        // different way to double check that nothing is missing.
+        let derived_variants = (0..=u8::MAX)
+            .map(ReasonForRevocation::from)
+            .filter(|t| {
+                match t {
+                    ReasonForRevocation::Private(_) => false,
+                    ReasonForRevocation::Unknown(_) => false,
+                    _ => true,
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        let known_variants
+            = HashSet::from_iter(REASON_FOR_REVOCATION_VARIANTS
+                                 .iter().cloned());
+
+        let missing = known_variants
+            .symmetric_difference(&derived_variants)
+            .collect::<Vec<_>>();
+
+        assert!(missing.is_empty(), "{:?}", missing);
+    }
+
+    #[test]
+    fn data_format_variants() {
+        use std::collections::HashSet;
+        use std::iter::FromIterator;
+
+        // DATA_FORMAT_VARIANTS is a list.  Derive it in a different
+        // way to double check that nothing is missing.
+        let derived_variants = (0..=u8::MAX)
+            .map(DataFormat::from)
+            .filter(|t| {
+                match t {
+                    DataFormat::Unknown(_) => false,
+                    _ => true,
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        let known_variants
+            = HashSet::from_iter(DATA_FORMAT_VARIANTS
+                                 .iter().cloned());
+
+        let missing = known_variants
+            .symmetric_difference(&derived_variants)
+            .collect::<Vec<_>>();
+
+        assert!(missing.is_empty(), "{:?}", missing);
     }
 }
