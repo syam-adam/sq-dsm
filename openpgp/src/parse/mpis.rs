@@ -10,10 +10,7 @@ use crate::{
     HashAlgorithm,
 };
 use crate::types::Curve;
-use crate::crypto::{
-    mem::Protected,
-    mpi::{self, MPI, ProtectedMPI},
-};
+use crate::crypto::mpi::{self, MPI};
 use crate::parse::{
     PacketHeaderParser,
     Cookie,
@@ -22,25 +19,25 @@ use crate::parse::{
 impl mpi::PublicKey {
     /// Parses a set of OpenPGP MPIs representing a public key.
     ///
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
     pub fn parse<R: Read + Send + Sync>(algo: PublicKeyAlgorithm, reader: R) -> Result<Self>
     {
         let bio = buffered_reader::Generic::with_cookie(
             reader, None, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
+        let mut php = PacketHeaderParser::new_naked(bio);
         Self::_parse(algo, &mut php)
     }
 
     /// Parses a set of OpenPGP MPIs representing a public key.
     ///
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
-    pub(crate) fn _parse(
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
+    pub(crate) fn _parse<'a, T: 'a + BufferedReader<Cookie>>(
         algo: PublicKeyAlgorithm,
-        php: &mut PacketHeaderParser<'_>)
+        php: &mut PacketHeaderParser<T>)
         -> Result<Self>
     {
         use crate::PublicKeyAlgorithm::*;
@@ -133,30 +130,6 @@ impl mpi::PublicKey {
                 })
             }
 
-            X25519 => {
-                let mut u = [0; 32];
-                php.parse_bytes_into("x25519_public", &mut u)?;
-                Ok(mpi::PublicKey::X25519 { u })
-            },
-
-            X448 => {
-                let mut u = [0; 56];
-                php.parse_bytes_into("x448_public", &mut u)?;
-                Ok(mpi::PublicKey::X448 { u: Box::new(u) })
-            },
-
-            Ed25519 => {
-                let mut a = [0; 32];
-                php.parse_bytes_into("ed25519_public", &mut a)?;
-                Ok(mpi::PublicKey::Ed25519 { a })
-            },
-
-            Ed448 => {
-                let mut a = [0; 57];
-                php.parse_bytes_into("ed448_public", &mut a)?;
-                Ok(mpi::PublicKey::Ed448 { a: Box::new(a) })
-            },
-
             Unknown(_) | Private(_) => {
                 let mut mpis = Vec::new();
                 while let Ok(mpi) = MPI::parse("unknown_len",
@@ -178,158 +151,102 @@ impl mpi::SecretKeyMaterial {
     /// Parses secret key MPIs for `algo` plus their SHA1 checksum.
     ///
     /// Fails if the checksum is wrong.
-    #[deprecated(
-        since = "1.14.0",
-        note = "Leaks secrets into the heap, use [`SecretKeyMaterial::from_bytes_with_checksum`]")]
     pub fn parse_with_checksum<R: Read + Send + Sync>(algo: PublicKeyAlgorithm,
                                         reader: R,
                                         checksum: mpi::SecretKeyChecksum)
                                         -> Result<Self> {
         let bio = buffered_reader::Generic::with_cookie(
             reader, None, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
-        Self::_parse(algo, &mut php, Some(checksum))
-    }
-
-    /// Parses secret key MPIs for `algo` plus their SHA1 checksum.
-    ///
-    /// Fails if the checksum is wrong.
-    pub fn from_bytes_with_checksum(algo: PublicKeyAlgorithm,
-                                    bytes: &[u8],
-                                    checksum: mpi::SecretKeyChecksum)
-                                    -> Result<Self> {
-        let bio = buffered_reader::Memory::with_cookie(
-            bytes, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
+        let mut php = PacketHeaderParser::new_naked(bio);
         Self::_parse(algo, &mut php, Some(checksum))
     }
 
     /// Parses a set of OpenPGP MPIs representing a secret key.
     ///
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
-    #[deprecated(
-        since = "1.14.0",
-        note = "Leaks secrets into the heap, use [`SecretKeyMaterial::from_bytes`]")]
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
     pub fn parse<R: Read + Send + Sync>(algo: PublicKeyAlgorithm, reader: R) -> Result<Self>
     {
         let bio = buffered_reader::Generic::with_cookie(
             reader, None, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
+        let mut php = PacketHeaderParser::new_naked(bio);
         Self::_parse(algo, &mut php, None)
     }
 
     /// Parses a set of OpenPGP MPIs representing a secret key.
     ///
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
-    pub fn from_bytes(algo: PublicKeyAlgorithm, buf: &[u8]) -> Result<Self> {
-        let bio = buffered_reader::Memory::with_cookie(
-            buf, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
-        Self::_parse(algo, &mut php, None)
-    }
-
-    /// Parses a set of OpenPGP MPIs representing a secret key.
-    ///
-    /// See [Section 3.2 of RFC 9580] for details.
-    ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
-    pub(crate) fn _parse(
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
+    pub(crate) fn _parse<'a, T: 'a + BufferedReader<Cookie>>(
         algo: PublicKeyAlgorithm,
-        php: &mut PacketHeaderParser<'_>,
+        php: &mut PacketHeaderParser<T>,
         checksum: Option<mpi::SecretKeyChecksum>,
     )
         -> Result<Self>
     {
         use crate::PublicKeyAlgorithm::*;
 
-        // We want to get the data we are going to read next as raw
-        // bytes later.  To do so, we remember the cursor position now
-        // before reading the MPIs.
-        let mpis_start = php.reader.total_out();
-
         #[allow(deprecated)]
         let mpis: Result<Self> = match algo {
             RSAEncryptSign | RSAEncrypt | RSASign => {
+                let d = MPI::parse("rsa_secret_d_len", "rsa_secret_d", php)?;
+                let p = MPI::parse("rsa_secret_p_len", "rsa_secret_p", php)?;
+                let q = MPI::parse("rsa_secret_q_len", "rsa_secret_q", php)?;
+                let u = MPI::parse("rsa_secret_u_len", "rsa_secret_u", php)?;
+
                 Ok(mpi::SecretKeyMaterial::RSA {
-                    d: ProtectedMPI::parse(
-                        "rsa_secret_d_len", "rsa_secret_d", php)?,
-                    p: ProtectedMPI::parse(
-                        "rsa_secret_p_len", "rsa_secret_p", php)?,
-                    q: ProtectedMPI::parse(
-                        "rsa_secret_q_len", "rsa_secret_q", php)?,
-                    u: ProtectedMPI::parse(
-                        "rsa_secret_u_len", "rsa_secret_u", php)?,
+                    d: d.into(),
+                    p: p.into(),
+                    q: q.into(),
+                    u: u.into(),
                 })
             }
 
             DSA => {
+                let x = MPI::parse("dsa_secret_len", "dsa_secret", php)?;
+
                 Ok(mpi::SecretKeyMaterial::DSA {
-                    x: ProtectedMPI::parse(
-                        "dsa_secret_len", "dsa_secret", php)?,
+                    x: x.into(),
                 })
             }
 
             ElGamalEncrypt | ElGamalEncryptSign => {
+                let x = MPI::parse("elgamal_secret_len", "elgamal_secret",
+                                   php)?;
+
                 Ok(mpi::SecretKeyMaterial::ElGamal {
-                    x: ProtectedMPI::parse(
-                        "elgamal_secret_len", "elgamal_secret", php)?,
+                    x: x.into(),
                 })
             }
 
             EdDSA => {
                 Ok(mpi::SecretKeyMaterial::EdDSA {
-                    scalar: ProtectedMPI::parse(
-                        "eddsa_secret_len", "eddsa_secret", php)?,
+                    scalar: MPI::parse("eddsa_secret_len", "eddsa_secret", php)?
+                                .into()
                 })
             }
 
             ECDSA => {
                 Ok(mpi::SecretKeyMaterial::ECDSA {
-                    scalar: ProtectedMPI::parse(
-                        "ecdsa_secret_len", "ecdsa_secret", php)?,
+                    scalar: MPI::parse("ecdsa_secret_len", "ecdsa_secret", php)?
+                                .into()
                 })
             }
 
             ECDH => {
                 Ok(mpi::SecretKeyMaterial::ECDH {
-                    scalar: ProtectedMPI::parse(
-                        "ecdh_secret_len", "ecdh_secret", php)?,
+                    scalar: MPI::parse("ecdh_secret_len", "ecdh_secret", php)?
+                                .into()
                 })
             }
 
-            X25519 => {
-                let mut x: Protected = vec![0; 32].into();
-                php.parse_bytes_into("x25519_secret", &mut x)?;
-                Ok(mpi::SecretKeyMaterial::X25519 { x })
-            },
-
-            X448 => {
-                let mut x: Protected = vec![0; 56].into();
-                php.parse_bytes_into("x448_secret", &mut x)?;
-                Ok(mpi::SecretKeyMaterial::X448 { x })
-            },
-
-            Ed25519 => {
-                let mut x: Protected = vec![0; 32].into();
-                php.parse_bytes_into("ed25519_secret", &mut x)?;
-                Ok(mpi::SecretKeyMaterial::Ed25519 { x })
-            },
-
-            Ed448 => {
-                let mut x: Protected = vec![0; 57].into();
-                php.parse_bytes_into("ed448_secret", &mut x)?;
-                Ok(mpi::SecretKeyMaterial::Ed448 { x })
-            },
-
             Unknown(_) | Private(_) => {
                 let mut mpis = Vec::new();
-                while let Ok(mpi) = ProtectedMPI::parse("unknown_len",
+                while let Ok(mpi) = MPI::parse("unknown_len",
                                                "unknown", php) {
-                    mpis.push(mpi);
+                    mpis.push(mpi.into());
                 }
                 let rest = php.parse_bytes_eof("rest")?;
 
@@ -342,32 +259,15 @@ impl mpi::SecretKeyMaterial {
         let mpis = mpis?;
 
         if let Some(checksum) = checksum {
-            // We want to get the data we are going to read next as
-            // raw bytes later.  To do so, we remember the cursor
-            // position now after reading the MPIs and compute the
-            // length.
-            let mpis_len = php.reader.total_out() - mpis_start;
-
-            // We do a bit of acrobatics to avoid copying the secrets.
-            // We read the checksum now, so that we can freely
-            // manipulate the Dup reader and get a borrow of the raw
-            // MPIs.
-            let their_chksum = php.parse_bytes("checksum", checksum.len())?;
-
-            // Remember how much we read in total for a sanity check.
-            let total_out = php.reader.total_out();
-
-            // Now get the secrets as raw byte slice.
-            php.reader.rewind();
-            php.reader.consume(mpis_start);
-            let data = &php.reader.data_consume_hard(mpis_len)?[..mpis_len];
-
+            use crate::serialize::{Marshal, MarshalInto};
             let good = match checksum {
                 mpi::SecretKeyChecksum::SHA1 => {
+                    // Read expected SHA1 hash of the MPIs.
+                    let their_chksum = php.parse_bytes("checksum", 20)?;
+
                     // Compute SHA1 hash.
-                    let mut hsh = HashAlgorithm::SHA1.context().unwrap()
-                        .for_digest();
-                    hsh.update(data);
+                    let mut hsh = HashAlgorithm::SHA1.context().unwrap();
+                    mpis.serialize(&mut hsh)?;
                     let mut our_chksum = [0u8; 20];
                     let _ = hsh.digest(&mut our_chksum);
 
@@ -375,21 +275,17 @@ impl mpi::SecretKeyMaterial {
                 },
 
                 mpi::SecretKeyChecksum::Sum16 => {
+                    // Read expected sum of the MPIs.
+                    let their_chksum = php.parse_bytes("checksum", 2)?;
+
                     // Compute sum.
-                    let our_chksum = data.iter()
+                    let our_chksum = mpis.to_vec()?.iter()
                         .fold(0u16, |acc, v| acc.wrapping_add(*v as u16))
                         .to_be_bytes();
 
                     our_chksum == their_chksum[..]
                 },
             };
-
-            // Finally, consume the checksum to fix the state of the
-            // Dup reader.
-            php.reader.consume(checksum.len());
-
-            // See if we got the state right.
-            debug_assert_eq!(total_out, php.reader.total_out());
 
             if good {
                 Ok(mpis)
@@ -406,26 +302,26 @@ impl mpi::Ciphertext {
     /// Parses a set of OpenPGP MPIs representing a ciphertext.
     ///
     /// Expects MPIs for a public key algorithm `algo`s ciphertext.
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
     pub fn parse<R: Read + Send + Sync>(algo: PublicKeyAlgorithm, reader: R) -> Result<Self>
     {
         let bio = buffered_reader::Generic::with_cookie(
             reader, None, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
+        let mut php = PacketHeaderParser::new_naked(bio);
         Self::_parse(algo, &mut php)
     }
 
     /// Parses a set of OpenPGP MPIs representing a ciphertext.
     ///
     /// Expects MPIs for a public key algorithm `algo`s ciphertext.
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
-    pub(crate) fn _parse(
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
+    pub(crate) fn _parse<'a, T: 'a + BufferedReader<Cookie>>(
         algo: PublicKeyAlgorithm,
-        php: &mut PacketHeaderParser<'_>)
+        php: &mut PacketHeaderParser<T>)
         -> Result<Self> {
         use crate::PublicKeyAlgorithm::*;
 
@@ -461,24 +357,6 @@ impl mpi::Ciphertext {
                 })
             }
 
-            X25519 => {
-                let mut e = [0; 32];
-                php.parse_bytes_into("x25519_e", &mut e)?;
-                let key_len = php.parse_u8("x25519_esk_len")? as usize;
-                let key = Vec::from(&php.parse_bytes("x25519_esk", key_len)?
-                                    [..key_len]);
-                Ok(mpi::Ciphertext::X25519 { e: Box::new(e), key: key.into() })
-            },
-
-            X448 => {
-                let mut e = [0; 56];
-                php.parse_bytes_into("x448_e", &mut e)?;
-                let key_len = php.parse_u8("x448_esk_len")? as usize;
-                let key = Vec::from(&php.parse_bytes("x448_esk", key_len)?
-                                    [..key_len]);
-                Ok(mpi::Ciphertext::X448 { e: Box::new(e), key: key.into() })
-            },
-
             Unknown(_) | Private(_) => {
                 let mut mpis = Vec::new();
                 while let Ok(mpi) = MPI::parse("unknown_len",
@@ -493,9 +371,8 @@ impl mpi::Ciphertext {
                 })
             }
 
-            RSASign | DSA | EdDSA | ECDSA | Ed25519 | Ed448
-                => Err(Error::InvalidArgument(
-                    format!("not an encryption algorithm: {:?}", algo)).into()),
+            RSASign | DSA | EdDSA | ECDSA => Err(Error::InvalidArgument(
+                format!("not an encryption algorithm: {:?}", algo)).into()),
         }
     }
 }
@@ -504,26 +381,26 @@ impl mpi::Signature {
     /// Parses a set of OpenPGP MPIs representing a signature.
     ///
     /// Expects MPIs for a public key algorithm `algo`s signature.
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
     pub fn parse<R: Read + Send + Sync>(algo: PublicKeyAlgorithm, reader: R) -> Result<Self>
     {
         let bio = buffered_reader::Generic::with_cookie(
             reader, None, Cookie::default());
-        let mut php = PacketHeaderParser::new_naked(bio.into_boxed());
+        let mut php = PacketHeaderParser::new_naked(bio);
         Self::_parse(algo, &mut php)
     }
 
     /// Parses a set of OpenPGP MPIs representing a signature.
     ///
     /// Expects MPIs for a public key algorithm `algo`s signature.
-    /// See [Section 3.2 of RFC 9580] for details.
+    /// See [Section 3.2 of RFC 4880] for details.
     ///
-    ///   [Section 3.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-3.2
-    pub(crate) fn _parse(
+    ///   [Section 3.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-3.2
+    pub(crate) fn _parse<'a, T: 'a + BufferedReader<Cookie>>(
         algo: PublicKeyAlgorithm,
-        php: &mut PacketHeaderParser<'_>)
+        php: &mut PacketHeaderParser<T>)
         -> Result<Self> {
         use crate::PublicKeyAlgorithm::*;
 
@@ -585,18 +462,6 @@ impl mpi::Signature {
                 })
             }
 
-            Ed25519 => {
-                let mut s = [0; 64];
-                php.parse_bytes_into("ed25519_sig", &mut s)?;
-                Ok(mpi::Signature::Ed25519 { s: Box::new(s) })
-            },
-
-            Ed448 => {
-                let mut s = [0; 114];
-                php.parse_bytes_into("ed448_sig", &mut s)?;
-                Ok(mpi::Signature::Ed448 { s: Box::new(s) })
-            },
-
             Unknown(_) | Private(_) => {
                 let mut mpis = Vec::new();
                 while let Ok(mpi) = MPI::parse("unknown_len",
@@ -611,9 +476,8 @@ impl mpi::Signature {
                 })
             }
 
-            RSAEncrypt | ElGamalEncrypt | ECDH | X25519 | X448
-                => Err(Error::InvalidArgument(
-                    format!("not a signature algorithm: {:?}", algo)).into()),
+            RSAEncrypt | ElGamalEncrypt | ECDH => Err(Error::InvalidArgument(
+                format!("not a signature algorithm: {:?}", algo)).into()),
         }
     }
 }

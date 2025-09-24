@@ -7,9 +7,11 @@ use crate::types::Bitfield;
 
 /// Describes preferences regarding key servers.
 ///
-/// Key server preferences are specified in [Section 5.2.3.25 of RFC 9580].
+/// Key server preferences are specified in [Section 5.2.3.17 of RFC 4880] and
+/// [Section 5.2.3.18 of RFC 4880bis].
 ///
-/// [Section 5.2.3.25 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.25
+/// [Section 5.2.3.17 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.17
+/// [Section 5.2.3.18 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09#section-5.2.3.18
 ///
 /// The keyserver preferences are set by the user's OpenPGP
 /// implementation to communicate them to any peers.
@@ -37,7 +39,7 @@ use crate::types::Bitfield;
 /// let p = &StandardPolicy::new();
 ///
 /// let (cert, _) =
-///     CertBuilder::general_purpose(Some("alice@example.org"))
+///     CertBuilder::general_purpose(None, Some("alice@example.org"))
 ///     .generate()?;
 ///
 /// match cert.with_policy(p, None)?.primary_userid()?.key_server_preferences() {
@@ -64,7 +66,7 @@ impl fmt::Debug for KeyServerPreferences {
             need_comma = true;
         }
 
-        for i in self.0.iter_set() {
+        for i in self.0.iter() {
             match i {
                 KEYSERVER_PREFERENCE_NO_MODIFY => (),
                 i => {
@@ -76,7 +78,8 @@ impl fmt::Debug for KeyServerPreferences {
         }
 
         // Mention any padding, as equality is sensitive to this.
-        if let Some(padding) = self.0.padding_bytes() {
+        let padding = self.0.padding_len();
+        if padding > 0 {
             if need_comma { f.write_str(", ")?; }
             write!(f, "+padding({} bytes)", padding)?;
         }
@@ -96,19 +99,14 @@ impl KeyServerPreferences {
         Self::new(&[])
     }
 
-    /// Returns a reference to the underlying [`Bitfield`].
-    pub fn as_bitfield(&self) -> &Bitfield {
-        &self.0
-    }
-
-    /// Returns a mutable reference to the underlying [`Bitfield`].
-    pub fn as_bitfield_mut(&mut self) -> &mut Bitfield {
-        &mut self.0
+    /// Returns a slice containing the raw values.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
     }
 
     /// Compares two key server preference sets for semantic equality.
     ///
-    /// `KeyServerPreferences` implementation of `PartialEq` compares
+    /// `KeyServerPreferences`' implementation of `PartialEq` compares
     /// two key server preference sets for serialized equality.  That
     /// is, the `PartialEq` implementation considers two key server
     /// preference sets to *not* be equal if they have different
@@ -177,10 +175,8 @@ impl KeyServerPreferences {
     /// # assert!(! ksp.no_modify());
     /// # Ok(()) }
     /// ```
-    pub fn set(mut self, bit: usize) -> Self {
-        self.0.set(bit);
-        self.0.canonicalize();
-        self
+    pub fn set(self, bit: usize) -> Self {
+        Self(self.0.set(bit))
     }
 
     /// Clears the specified keyserver preference flag.
@@ -203,10 +199,8 @@ impl KeyServerPreferences {
     /// # assert!(! ksp.no_modify());
     /// # Ok(()) }
     /// ```
-    pub fn clear(mut self, bit: usize) -> Self {
-        self.0.clear(bit);
-        self.0.canonicalize();
-        self
+    pub fn clear(self, bit: usize) -> Self {
+        Self(self.0.clear(bit))
     }
 
     /// Returns whether the certificate's owner requests that the
@@ -304,19 +298,16 @@ mod tests {
 
     quickcheck! {
         fn roundtrip(val: KeyServerPreferences) -> bool {
-            let mut q_bytes = val.as_bitfield().as_bytes().to_vec();
-            let q = KeyServerPreferences::new(&q_bytes);
+            let mut q = KeyServerPreferences::new(val.as_slice());
             assert_eq!(val, q);
             assert!(val.normalized_eq(&q));
 
             // Add some padding to q.  Make sure they are still equal.
-            q_bytes.push(0);
-            let q = KeyServerPreferences::new(&q_bytes);
+            q.0.raw.push(0);
             assert!(val != q);
             assert!(val.normalized_eq(&q));
 
-            q_bytes.push(0);
-            let q = KeyServerPreferences::new(&q_bytes);
+            q.0.raw.push(0);
             assert!(val != q);
             assert!(val.normalized_eq(&q));
 

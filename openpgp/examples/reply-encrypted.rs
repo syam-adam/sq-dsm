@@ -1,4 +1,4 @@
-//! Demonstrates how to reply to an encrypted message without having
+//! Demonstates how to reply to an encrypted message without having
 //! everyone's certs.
 //!
 //! This example demonstrates how to fall back to the original
@@ -40,7 +40,6 @@
 //! 9:62F3EADC98E1D3D34495E79264B5959391B4FABB2B2A2B7E03861F92D0B03161
 //! ```
 
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::env;
 use std::io;
@@ -49,7 +48,8 @@ use anyhow::Context;
 
 use sequoia_openpgp as openpgp;
 
-use openpgp::{Cert, KeyID};
+use openpgp::{KeyID, Fingerprint};
+use openpgp::cert::prelude::*;
 use openpgp::packet::prelude::*;
 use openpgp::crypto::{KeyPair, SessionKey};
 use openpgp::types::SymmetricAlgorithm;
@@ -88,7 +88,7 @@ pub fn main() -> openpgp::Result<()> {
         .context("Decryption failed")?;
 
     let (algo, sk, pkesks) = decryptor.into_helper().recycling_bin.unwrap();
-    eprintln!("- Reusing ({:?}, {}) with {} PKESK packets",
+    eprintln!("- Reusing ({}, {}) with {} PKESK packets",
               algo, openpgp::fmt::hex::encode(&sk), pkesks.len());
 
     // Compose a writer stack corresponding to the output format and
@@ -105,7 +105,7 @@ pub fn main() -> openpgp::Result<()> {
     }
 
     // We want to encrypt a literal data packet.
-    let message = Encryptor::with_session_key(message, algo.expect("XXX seipdv2"), sk)?
+    let message = Encryptor::with_session_key(message, algo, sk)?
         .build().context("Failed to create encryptor")?;
 
     let mut message = LiteralWriter::new(message).build()
@@ -127,24 +127,22 @@ pub fn main() -> openpgp::Result<()> {
 /// keys for the signature verification and implements the
 /// verification policy.
 struct Helper {
-    keys: HashMap<KeyID, (Arc<Cert>, KeyPair)>,
-    recycling_bin: Option<(Option<SymmetricAlgorithm>, SessionKey, Vec<PKESK>)>,
+    keys: HashMap<KeyID, (Fingerprint, KeyPair)>,
+    recycling_bin: Option<(SymmetricAlgorithm, SessionKey, Vec<PKESK>)>,
 }
 
 impl Helper {
     /// Creates a Helper for the given Certs with appropriate secrets.
     fn new(p: &dyn Policy, certs: Vec<openpgp::Cert>) -> Self {
-        // Map (sub)KeyIDs to certs and secrets.
+        // Map (sub)KeyIDs to primary fingerprints and secrets.
         let mut keys = HashMap::new();
         for cert in certs {
-            let cert = Arc::new(cert);
-
             for ka in cert.keys().unencrypted_secret().with_policy(p, None)
                 .supported()
                 .for_storage_encryption().for_transport_encryption()
             {
                 keys.insert(ka.key().keyid(),
-                            (cert.clone(),
+                            (cert.fingerprint(),
                              ka.key().clone().into_keypair().unwrap()));
             }
         }
@@ -157,18 +155,19 @@ impl Helper {
 }
 
 impl DecryptionHelper for Helper {
-    fn decrypt(&mut self,
-               pkesks: &[openpgp::packet::PKESK],
-               _skesks: &[openpgp::packet::SKESK],
-               sym_algo: Option<SymmetricAlgorithm>,
-               decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool)
-                  -> openpgp::Result<Option<Cert>>
+    fn decrypt<D>(&mut self,
+                  pkesks: &[openpgp::packet::PKESK],
+                  _skesks: &[openpgp::packet::SKESK],
+                  sym_algo: Option<SymmetricAlgorithm>,
+                  mut decrypt: D)
+                  -> openpgp::Result<Option<openpgp::Fingerprint>>
+        where D: FnMut(SymmetricAlgorithm, &SessionKey) -> bool
     {
         // Try each PKESK until we succeed.
         let mut recipient = None;
         let mut encryption_context = None;
         for pkesk in pkesks {
-            if let Some((cert, pair)) = self.keys.get_mut(&KeyID::from(pkesk.recipient())) {
+            if let Some((fp, pair)) = self.keys.get_mut(pkesk.recipient()) {
                 if pkesk.decrypt(pair, sym_algo)
                     .map(|(algo, session_key)| {
                         let success = decrypt(algo, &session_key);
@@ -186,7 +185,7 @@ impl DecryptionHelper for Helper {
                     })
                     .unwrap_or(false)
                 {
-                    recipient = Some(cert.as_ref().clone());
+                    recipient = Some(fp.clone());
                     break;
                 }
             }

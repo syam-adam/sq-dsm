@@ -2,9 +2,6 @@ use std::{
     borrow::Cow,
 };
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as base64std;
-
 use crate::{
     packet::Header,
 };
@@ -12,7 +9,7 @@ use crate::{
 /// Remove whitespace, etc. from the base64 data.
 ///
 /// This function returns the filtered base64 data (i.e., stripped of
-/// all skippable data like whitespace), and the amount of unfiltered
+/// all skipable data like whitespace), and the amount of unfiltered
 /// data that corresponds to.  Thus, if we have the following 7 bytes:
 ///
 /// ```text
@@ -32,6 +29,7 @@ use crate::{
 ///
 /// This function will stop after it sees base64 padding, and if it
 /// sees invalid base64 data.
+#[allow(clippy::single_match)]
 pub fn base64_filter(mut bytes: Cow<[u8]>, base64_data_max: usize,
                      mut prefix_remaining: usize, prefix_len: usize)
     -> (Cow<[u8]>, usize, usize)
@@ -165,7 +163,7 @@ pub fn is_armored_pgp_blob(bytes: &[u8]) -> bool {
     // packet's header.
     let (bytes, _, _) = base64_filter(Cow::Borrowed(bytes), 32, 0, 0);
 
-    match base64std.decode(bytes) {
+    match base64::decode_config(&bytes, base64::STANDARD) {
         Ok(d) => {
             // Don't consider an empty message to be valid.
             if d.is_empty() {

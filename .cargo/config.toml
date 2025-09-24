@@ -1,9 +1,0 @@
-[target.'cfg(all())']
-# Note: if the RUSTFLAGS environment variable is set, this will be
-# ignored.
-rustflags = [
-          "-Aunused-parens",
-          "-Aclippy::all",
-          "-Dclippy::correctness",
-          "-Dclippy::suspicious",
-]

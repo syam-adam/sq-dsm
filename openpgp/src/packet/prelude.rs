@@ -21,7 +21,7 @@
 //! ```
 
 pub use crate::packet::{
-    Any,
+    AED,
     Body,
     CompressedData,
     Container,
@@ -33,7 +33,6 @@ pub use crate::packet::{
     OnePassSig,
     PKESK,
     Packet,
-    Padding,
     SEIP,
     SKESK,
     Signature,
@@ -42,25 +41,17 @@ pub use crate::packet::{
     Unknown,
     UserAttribute,
     UserID,
+    aed::AED1,
     key,
     key::Key4,
-    key::Key6,
     key::SecretKeyMaterial,
     one_pass_sig::OnePassSig3,
-    one_pass_sig::OnePassSig6,
-    pkesk::{
-        PKESK3,
-        PKESK6,
-    },
-    seip::{
-        SEIP1,
-        SEIP2,
-    },
+    pkesk::PKESK3,
+    seip::SEIP1,
     signature,
     signature::Signature4,
-    signature::Signature6,
     signature::SignatureBuilder,
     skesk::SKESK4,
-    skesk::SKESK6,
+    skesk::SKESK5,
     user_attribute,
 };

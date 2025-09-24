@@ -18,12 +18,8 @@ use std::io;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::Path;
-use std::fmt::Debug;
 use std::fs::File;
 use std::str;
-
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as base64std;
 
 use sequoia_openpgp as openpgp;
 use openpgp::armor;
@@ -35,7 +31,6 @@ use openpgp::cert::prelude::*;
 use openpgp::parse::{
     Parse,
     PacketParserResult, PacketParser,
-    buffered_reader::BufferedReader,
 };
 use openpgp::serialize::Serialize;
 use openpgp::serialize::stream::{
@@ -208,7 +203,7 @@ impl AutocryptHeader {
 
         let mut buf = Vec::new();
         self.key.as_ref().unwrap().serialize(&mut buf)?;
-        write!(o, "keydata={} ", base64std.encode(&buf))?;
+        write!(o, "keydata={} ", base64::encode(&buf))?;
         Ok(())
     }
 
@@ -272,19 +267,8 @@ impl AutocryptHeaders {
 
             if let Some(rest) = line.strip_prefix(FROM) {
                 headers.from = Some(rest.trim_matches(' ').into());
-            } else {
-                if let Some((key, value)) =
-                    if let Some(v) = line.strip_prefix(AUTOCRYPT) {
-                        Some((AutocryptHeaderType::Sender, v))
-                    } else if let Some(v) = line.strip_prefix(AUTOCRYPT_GOSSIP) {
-                        Some((AutocryptHeaderType::Gossip, v))
-                    } else {
-                        None
-                    }
-                {
-                    headers.headers.push(
-                        Self::decode_autocrypt_like_header(key, value));
-                }
+            } else if line.starts_with(AUTOCRYPT) || line.starts_with(AUTOCRYPT_GOSSIP) {
+                headers.headers.push(Self::decode_autocrypt_like_header(&line));
             }
         }
 
@@ -294,42 +278,49 @@ impl AutocryptHeaders {
     /// Decode header that has the same format as the Autocrypt header.
     /// This function should be called only on "Autocrypt" or "Autocrypt-Gossip"
     /// headers.
-    fn decode_autocrypt_like_header(header_type: AutocryptHeaderType,
-                                    ac_value: &str)
-        -> AutocryptHeader
-    {
+    fn decode_autocrypt_like_header(line: &str) -> AutocryptHeader {
+        let mut parts = line.splitn(2, ": ");
+        let header_name = parts.next().unwrap();
+        let ac_value = parts.next().unwrap();
+
+        let header_type = match header_name {
+            "Autocrypt" => AutocryptHeaderType::Sender,
+            "Autocrypt-Gossip" => AutocryptHeaderType::Gossip,
+            other => panic!("Expected Autocrypt header but found: {}", other)
+        };
+
         let mut header = AutocryptHeader::empty(header_type);
 
         for pair in ac_value.split(';') {
             let pair = pair
-                .splitn(2, '=')
+                .splitn(2, |c| c == '=')
                 .collect::<Vec<&str>>();
 
-            let (key, value) : (&str, String) = if pair.len() == 1 {
+            let (key, value) : (String, String) = if pair.len() == 1 {
                 // No value...
-                (pair[0].trim_matches(' '), "".into())
+                (pair[0].trim_matches(' ').into(), "".into())
             } else {
-                (pair[0].trim_matches(' '),
+                (pair[0].trim_matches(' ').into(),
                  pair[1].trim_matches(' ').into())
             };
 
             if key == "keydata" {
-                if let Ok(decoded) = base64std.decode(
-                    &value.replace(' ', "")[..]) {
+                if let Ok(decoded) = base64::decode(
+                    &value.replace(" ", "")[..]) {
                     if let Ok(cert) = Cert::from_bytes(&decoded[..]) {
                         header.key = Some(cert);
                     }
                 }
             }
 
-            let (critical, key) = if let Some(key) = key.strip_prefix('_') {
-                (true, key)
-            } else {
-                (false, key)
-            };
+            let critical = !key.is_empty() && &key[0..1] == "_";
             header.attributes.push(Attribute {
                 critical,
-                key: key.to_string(),
+                key: if critical {
+                    key[1..].to_string()
+                } else {
+                    key
+                },
                 value,
             });
         }
@@ -359,16 +350,6 @@ impl AutocryptHeaders {
     /// emails, then only the first mail is considered.
     pub fn from_reader<R: io::Read>(reader: R) -> Result<Self> {
         Self::from_lines(BufReader::new(reader).lines())
-    }
-
-    /// Parses an autocrypt header.
-    ///
-    /// `reader` should be all of a mail's headers.
-    pub fn from_buffered_reader<R, C>(mut reader: R) -> Result<Self>
-    where R: BufferedReader<C>,
-          C: Debug + Send + Sync
-    {
-        Self::from_bytes(reader.data_eof()?)
     }
 }
 
@@ -465,7 +446,7 @@ impl AutocryptSetupMessage {
 
 
     // Generates a new passcode in "numeric9x4" format.
-    fn passcode_gen() -> Result<Password> {
+    fn passcode_gen() -> Password {
         use openpgp::crypto::mem;
         // Generate a random passcode.
 
@@ -473,7 +454,7 @@ impl AutocryptSetupMessage {
         // approximately 119 bits of information.  120 bits = 15
         // bytes.
         let mut p_as_vec = mem::Protected::from(vec![0; 15]);
-        openpgp::crypto::random(&mut p_as_vec[..])?;
+        openpgp::crypto::random(&mut p_as_vec[..]);
 
         // Turn it into a 128-bit number.
         let mut p_as_u128 = 0u128;
@@ -492,22 +473,21 @@ impl AutocryptSetupMessage {
             p_as_u128 /= 10;
         }
 
-        Ok(p.into())
+        p.into()
     }
 
     /// If there is no passcode, generates one.
-    fn passcode_ensure(&mut self) -> Result<()> {
+    fn passcode_ensure(&mut self) {
         if self.passcode.is_some() {
-            return Ok(());
+            return;
         }
 
-        let passcode = Self::passcode_gen()?;
+        let passcode = Self::passcode_gen();
         self.passcode_format = Some("numeric9x4".into());
         self.passcode_begin = passcode.map(|p| {
             Some(str::from_utf8(&p[..2]).unwrap().into())
         });
         self.passcode = Some(passcode);
-        Ok(())
     }
 
     /// Generates the Autocrypt Setup Message.
@@ -521,7 +501,7 @@ impl AutocryptSetupMessage {
         // SEIP packet contains a literal data packet whose content is
         // the inner message.
 
-        self.passcode_ensure()?;
+        self.passcode_ensure();
 
         let mut headers : Vec<(&str, &str)> = Vec::new();
         if let Some(ref format) = self.passcode_format {
@@ -575,7 +555,7 @@ impl AutocryptSetupMessage {
         -> Result<AutocryptSetupMessageParser<'a>> {
         // The outer message uses ASCII-armor.  It includes a password
         // hint.  Hence, we need to parse it aggressively.
-        let mut r = armor::Reader::from_reader(
+        let mut r = armor::Reader::new(
             r, armor::ReaderMode::Tolerant(Some(armor::Kind::Message)));
 
         // Note, it is essential that we call r.headers here so that
@@ -703,7 +683,7 @@ impl<'a> AutocryptSetupMessageParser<'a> {
     /// `AutocryptSetupMessageParser::parse()` to extract the
     /// `AutocryptSetupMessage`.
     pub fn decrypt(&mut self, passcode: &Password) -> Result<()> {
-        if self.pp.processed() {
+        if ! self.pp.encrypted() {
             return Err(
                 Error::InvalidOperation("Already decrypted".into()).into());
         }
@@ -727,7 +707,7 @@ impl<'a> AutocryptSetupMessageParser<'a> {
     /// If the payload is malformed, returns
     /// `Error::MalformedMessage`.
     pub fn parse(self) -> Result<AutocryptSetupMessage> {
-        if ! self.pp.processed() {
+        if self.pp.encrypted() {
             return Err(
                 Error::InvalidOperation("Not decrypted".into()).into());
         }
@@ -755,7 +735,7 @@ impl<'a> AutocryptSetupMessageParser<'a> {
             // The inner message consists of an ASCII-armored encoded
             // Cert.
             let (prefer_encrypt, cert) = {
-                let mut r = armor::Reader::from_reader(
+                let mut r = armor::Reader::new(
                     &mut pp,
                     armor::ReaderMode::Tolerant(
                         Some(armor::Kind::SecretKey)));
@@ -799,7 +779,6 @@ impl<'a> AutocryptSetupMessageParser<'a> {
         // Get the MDC packet.
         if let PacketParserResult::Some(pp) = ppr {
             match pp.packet {
-                #[allow(deprecated)]
                 Packet::MDC(_) => (),
                 ref p => return
                     Err(Error::MalformedMessage(
@@ -840,7 +819,6 @@ impl<'a> AutocryptSetupMessageParser<'a> {
 
 #[cfg(test)]
 mod test {
-    use sequoia_openpgp::parse::buffered_reader;
     use super::*;
 
     use openpgp::policy::StandardPolicy as P;
@@ -867,7 +845,7 @@ mod test {
             .expect("Failed to parse key material.");
         assert_eq!(cert.fingerprint(),
                    "156962B0F3115069ACA970C68E3B03A279B772D6".parse().unwrap());
-        assert_eq!(cert.userids().next().unwrap().userid().value(),
+        assert_eq!(cert.userids().next().unwrap().value(),
                    &b"holger krekel <holger@merlinux.eu>"[..]);
 
 
@@ -892,7 +870,7 @@ mod test {
             .expect("Failed to parse key material.");
         assert_eq!(cert.fingerprint(),
                    "D4AB192964F76A7F8F8A9B357BD18320DEADFA11".parse().unwrap());
-        assert_eq!(cert.userids().next().unwrap().userid().value(),
+        assert_eq!(cert.userids().next().unwrap().value(),
                    &b"Vincent Breitmoser <look@my.amazin.horse>"[..]);
 
 
@@ -917,7 +895,7 @@ mod test {
             .expect("Failed to parse key material.");
         assert_eq!(cert.fingerprint(),
                    "4F9F89F5505AC1D1A260631CDB1187B9DD5F693B".parse().unwrap());
-        assert_eq!(cert.userids().next().unwrap().userid().value(),
+        assert_eq!(cert.userids().next().unwrap().value(),
                    &b"Patrick Brunschwig <patrick@enigmail.net>"[..]);
 
         let ac2 = AutocryptHeaders::from_bytes(
@@ -927,40 +905,6 @@ mod test {
         assert_eq!(ac, ac2);
     }
 
-    #[test]
-    fn parse_from_buffered_reader() {
-        // This test relies on 'from_bytes(...)' parser which, in case of a bug,
-        // may cause this test to fail as well.
-        let ac1_bytes = AutocryptHeaders::from_bytes(
-            &include_bytes!("../tests/data/hpk.txt")[..]
-        )
-        .unwrap();
-        let ac2_bytes = AutocryptHeaders::from_bytes(
-            &include_bytes!("../tests/data/vincent.txt")[..]
-        )
-        .unwrap();
-        let ac3_bytes = AutocryptHeaders::from_bytes(
-            &include_bytes!("../tests/data/patrick_unfolded.txt")[..]
-        )
-        .unwrap();
-
-        let ac1_br = AutocryptHeaders::from_buffered_reader(
-            buffered_reader::File::open("tests/data/hpk.txt").unwrap()
-        )
-        .unwrap();
-        let ac2_br = AutocryptHeaders::from_buffered_reader(
-            buffered_reader::File::open("tests/data/vincent.txt").unwrap()
-        )
-        .unwrap();
-        let ac3_br = AutocryptHeaders::from_buffered_reader(
-            buffered_reader::File::open("tests/data/patrick_unfolded.txt").unwrap()
-        )
-        .unwrap();
-
-        assert_eq!(ac1_bytes, ac1_br);
-        assert_eq!(ac2_bytes, ac2_br);
-        assert_eq!(ac3_bytes, ac3_br);
-    }
 
     #[test]
     fn decode_gossip() {
@@ -984,7 +928,7 @@ mod test {
             .expect("Failed to parse key material.");
         assert_eq!(cert.fingerprint(),
                    "C4BC2DDB38CCE96485EBE9C2F20691179038E5C6".parse().unwrap());
-        assert_eq!(cert.userids().next().unwrap().userid().value(),
+        assert_eq!(cert.userids().next().unwrap().value(),
                 &b"Daniel Kahn Gillmor <dkg@fifthhorseman.net>"[..]);
 
     }
@@ -1001,7 +945,7 @@ mod test {
         let passcode_len = 36 + (36 / 4 - 1);
 
         for _ in 0..samples {
-            let p = AutocryptSetupMessage::passcode_gen().unwrap();
+            let p = AutocryptSetupMessage::passcode_gen();
             p.map(|p| {
                 assert_eq!(p.len(), passcode_len);
 
@@ -1181,21 +1125,5 @@ mod test {
             0x00, 0x00, 0x00, 0x00, 0x01, 0x70,
         ];
         let _ = AutocryptHeaders::from_bytes(&data);
-    }
-
-    #[test]
-    fn issue_1012() {
-        let data: Vec<u8> = vec![
-            0x41, 0x75, 0x74, 0x6f, 0x63, 0x72, 0x79, 0x70, 0x74, 0x2d, 0x47, 0x6f, 0x73, 0x73, 0x69,
-            0x70, 0x3a, 0x20, 0xc8, 0x84, 0x01, 0x42, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x25, 0x25, 0x25,
-            0x25, 0x42, 0x25, 0x3f, 0x21, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25,
-            0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x00, 0x40, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25,
-            0x25, 0x22, 0x6b, 0x25, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0x25, 0x25, 0x25, 0x25,
-            0x25, 0x25, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x25, 0x25, 0x25, 0x25, 0x25,
-            0x25, 0x25, 0x25, 0x25, 0x25, 0x25, 0x25,
-        ];
-
-        AutocryptHeaders::from_bytes(&data).expect("parses");
     }
 }

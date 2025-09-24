@@ -26,22 +26,23 @@
 //! that case, the fingerprint could not be used as a long-term,
 //! unique, and stable identifier.
 //!
-//! Signatures are described in [Section 5.2 of RFC 9580].
+//! Signatures are described in [Section 5.2 of RFC 4880].
 //!
 //! # Data Types
 //!
 //! The main signature-related data type is the [`Signature`] enum.
 //! This enum abstracts away the differences between the signature
-//! formats (the current [version 6], the deprecated [version 4], and
-//! the legacy [version 3] formats).  Nevertheless some functionality
-//! remains format specific.  For instance, [version 4] signatures
-//! introduced support for storing arbitrary key-value pairs
-//! (so-called [notations]).
+//! formats (the deprecated [version 3], the current [version 4], and
+//! the proposed [version 5] formats).  Nevertheless some
+//! functionality remains format specific.  For instance, version 4
+//! signatures introduced support for storing arbitrary key-value
+//! pairs (so-called [notations]).
 //!
-//! This version of Sequoia supports [version 6] and [version 4]
-//! signatures ([`Signature6`] and [`Signature4`]), and includes
-//! limited support for [version 3] signatures to allow working with
-//! archived messages.
+//! This version of Sequoia only supports version 4 signatures
+//! ([`Signature4`]).  However, future versions may include limited
+//! support for version 3 signatures to allow working with archived
+//! messages, and we intend to add support for version 5 signatures
+//! once the new version of the specification has been finalized.
 //!
 //! When signing a document, a `Signature` is typically created
 //! indirectly by the [streaming `Signer`].  Similarly, a `Signature`
@@ -77,17 +78,17 @@
 //! # }
 //! ```
 //!
-//! For [version 6] and [version 4] signatures, attributes are set
-//! using so-called subpackets.  Subpackets can be stored in two
-//! places: either in the so-called hashed area or in the so-called
-//! unhashed area.  Whereas the hashed area's integrity is protected
-//! by the signature, the unhashed area is not.  Because an attacker
-//! can modify the unhashed area without detection, the unhashed area
-//! should only be used for storing self-authenticating data, e.g.,
-//! the issuer, or a back signature.  It is also sometimes used for
-//! [hints].  [`Signature::normalize`] removes unexpected subpackets
-//! from the unhashed area.  However, due to a lack of context, it
-//! does not validate the remaining subpackets.
+//! For version 4 signatures, attributes are set using so-called
+//! subpackets.  Subpackets can be stored in two places: either in the
+//! so-called hashed area or in the so-called unhashed area.  Whereas
+//! the hashed area's integrity is protected by the signature, the
+//! unhashed area is not.  Because an attacker can modify the unhashed
+//! area without detection, the unhashed area should only be used for
+//! storing self-authenticating data, e.g., the issuer, or a back
+//! signature.  It is also sometimes used for [hints].
+//! [`Signature::normalize`] removes unexpected subpackets from the
+//! unhashed area.  However, due to a lack of context, it does not
+//! validate the remaining subpackets.
 //!
 //! In Sequoia, each subpacket area is represented by a
 //! [`SubpacketArea`] data structure.  The two subpacket areas are
@@ -97,27 +98,24 @@
 //! consults the unhashed subpacket area for certain packets.  See
 //! [its documentation] for details.
 //!
-//! [Section 5.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2
+//! [Section 5.2 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2
 //! [`Signature`]: super::Signature
 //! [version 3]: https://tools.ietf.org/html/rfc1991#section-5.2.2
-//! [version 4]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3
-//! [version 6]: https://www.rfc-editor.org/rfc/rfc9580.html#name-versions-4-and-6-signature-
-//! [notations]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+//! [version 4]: https://tools.ietf.org/html/rfc4880#section-5.2.3
+//! [version 5]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#name-version-4-and-5-signature-p
+//! [notations]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
 //! [streaming `Signer`]: crate::serialize::stream::Signer
 //! [`PacketParser`]: crate::parse::PacketParser
-//! [hints]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.13
+//! [hints]: https://tools.ietf.org/html/rfc4880#section-5.13
 //! [`Signature::normalize`]: super::Signature::normalize()
 //! [`SubpacketArea`]: subpacket::SubpacketArea
 //! [`SubpacketAreas`]: subpacket::SubpacketAreas
 //! [its documentation]: subpacket::SubpacketAreas
 
-use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::convert::TryFrom;
 use std::fmt;
 use std::hash::Hasher;
 use std::ops::{Deref, DerefMut};
-use std::sync::OnceLock;
 use std::time::SystemTime;
 
 #[cfg(test)]
@@ -127,10 +125,9 @@ use crate::Error;
 use crate::Result;
 use crate::crypto::{
     mpi,
-    hash::{self, Hash},
+    hash::{self, Hash, Digest},
     Signer,
 };
-use crate::KeyID;
 use crate::KeyHandle;
 use crate::HashAlgorithm;
 use crate::PublicKeyAlgorithm;
@@ -151,11 +148,10 @@ use crate::packet::signature::subpacket::{
     SubpacketTag,
     SubpacketValue,
 };
-use crate::types::Timestamp;
 
 #[cfg(test)]
 /// Like quickcheck::Arbitrary, but bounded.
-pub(crate) trait ArbitraryBounded {
+trait ArbitraryBounded {
     /// Generates an arbitrary value, but only recurses if `depth >
     /// 0`.
     fn arbitrary_bounded(g: &mut Gen, depth: usize) -> Self;
@@ -179,9 +175,6 @@ macro_rules! impl_arbitrary_with_bound {
 }
 
 pub mod subpacket;
-pub mod cache;
-mod v6;
-pub use v6::Signature6;
 
 /// How many seconds to backdate signatures.
 ///
@@ -212,7 +205,7 @@ pub(crate) const SIG_BACKDATE_BY: u64 = 60;
 ///
 /// A `SignatureField` derefs to a [`SubpacketAreas`].
 ///
-/// [`Signature`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2
+/// [`Signature`]: https://tools.ietf.org/html/rfc4880#section-5.2
 /// [`SubpacketAreas`]: subpacket::SubpacketAreas
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SignatureFields {
@@ -289,37 +282,6 @@ impl SignatureFields {
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum SBVersion {
-    V4 {},
-    V6 {
-        salt: Vec<u8>,
-    },
-}
-
-impl Default for SBVersion {
-    fn default() -> Self {
-        SBVersion::V4 {}
-    }
-}
-
-impl SBVersion {
-    fn to_u8(&self) -> u8 {
-        match self {
-            SBVersion::V4 { .. } => 4,
-            SBVersion::V6 { .. } => 6,
-        }
-    }
-
-    /// Returns the salt, if any.
-    pub(crate) fn salt(&self) -> Option<&[u8]> {
-        match self {
-            SBVersion::V4 { .. } => None,
-            SBVersion::V6 { salt, .. } => Some(&salt),
-        }
-    }
-}
-
 /// A Signature builder.
 ///
 /// The `SignatureBuilder` is used to create [`Signature`]s.  Although
@@ -345,7 +307,7 @@ impl SBVersion {
 /// template, which is often the case when updating self signatures,
 /// and binding signatures.
 ///
-/// According to [Section 5.2.3.11 of RFC 9580], `Signatures` must
+/// According to [Section 5.2.3.4 of RFC 4880], `Signatures` must
 /// include a [`Signature Creation Time`] subpacket.  Since this
 /// should usually be set to the current time, and is easy to forget
 /// to update, we remove any `Signature Creation Time` subpackets
@@ -368,8 +330,8 @@ impl SBVersion {
 /// explicitly set a signature creation time, or preserve the original
 /// one, or suppress the insertion of a timestamp.
 ///
-///   [Section 5.2.3.11 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
-///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+///   [Section 5.2.3.4 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
+///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
 ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
 ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
 ///   [`suppress_signature_creation_time`]: SignatureBuilder::suppress_signature_creation_time()
@@ -390,8 +352,8 @@ impl SBVersion {
 /// the [`set_issuer`] method and the [`set_issuer_fingerprint`]
 /// method, respectively).
 ///
-///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
-///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
+///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
 ///   [`Signer`]: super::super::crypto::Signer
 ///   [`set_issuer`]: SignatureBuilder::set_issuer()
 ///   [`set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
@@ -474,7 +436,7 @@ impl SBVersion {
 /// }
 ///
 /// // Merge in the new signatures.
-/// let cert = cert.insert_packets(sigs.into_iter().map(Packet::from))?.0;
+/// let cert = cert.insert_packets(sigs.into_iter().map(Packet::from))?;
 /// # assert_eq!(cert.bad_signatures().count(), 0);
 /// # Ok(())
 /// # }
@@ -483,18 +445,9 @@ impl SBVersion {
 // IMPORTANT: implement PartialEq, Eq, and Hash.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct SignatureBuilder {
-    reference_time: Option<SystemTime>,
     overrode_creation_time: bool,
     original_creation_time: Option<SystemTime>,
-    pub(crate) fields: SignatureFields,
-
-    /// The version of signature in the signature builder.
-    ///
-    /// Note: this is called sb_version instead of version, because
-    /// currently SignaturBuilder derefs to SignatureFields, which
-    /// also has a field called version, which lead to a lot of
-    /// confusion.  Consider renaming it once the deref is gone.
-    pub(crate) sb_version: SBVersion,
+    fields: SignatureFields,
 }
 assert_send_and_sync!(SignatureBuilder);
 
@@ -516,7 +469,6 @@ impl SignatureBuilder {
     /// Returns a new `SignatureBuilder` object.
     pub fn new(typ: SignatureType) ->  Self {
         SignatureBuilder {
-            reference_time: None,
             overrode_creation_time: false,
             original_creation_time: None,
             fields: SignatureFields {
@@ -525,8 +477,7 @@ impl SignatureBuilder {
                 pk_algo: PublicKeyAlgorithm::Unknown(0),
                 hash_algo: HashAlgorithm::default(),
                 subpackets: SubpacketAreas::default(),
-            },
-            sb_version: SBVersion::default(),
+            }
         }
     }
 
@@ -548,7 +499,7 @@ impl SignatureBuilder {
     /// self-contained signature, which is only over the signature
     /// packet.
     ///
-    ///   [Standalone Signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [Standalone Signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///   [`SignatureType::Standalone`]: crate::types::SignatureType::Standalone
     ///
     /// This function checks that the [signature type] (passed to
@@ -576,9 +527,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -587,7 +538,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -623,11 +574,16 @@ impl SignatureBuilder {
     pub fn sign_standalone(mut self, signer: &mut dyn Signer)
                            -> Result<Signature>
     {
+        match self.typ {
+            SignatureType::Standalone => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(signer)?;
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_standalone(&mut hash)?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_standalone(&mut hash);
         self.sign(signer, hash.into_digest()?)
     }
 
@@ -647,14 +603,14 @@ impl SignatureBuilder {
     /// area.
     ///
     ///
-    ///   [Standalone Signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [Standalone Signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///   [`SignatureBuilder::sign_standalone`]: SignatureBuilder::sign_standalone()
-    ///   [Timestamp Signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [Timestamp Signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [timestamping services]: https://en.wikipedia.org/wiki/Trusted_timestamping
-    ///   [Signature Target subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    ///   [Signature Target subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     ///   [`SignatureBuilder::set_signature_target`]: SignatureBuilder::set_signature_target()
-    ///   [Embedded Signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
+    ///   [Embedded Signature]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
     ///   [`SignatureBuilder::set_embedded_signature`]: SignatureBuilder::set_embedded_signature()
     ///
     /// This function checks that the [signature type] (passed to
@@ -682,9 +638,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -693,7 +649,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -731,11 +687,16 @@ impl SignatureBuilder {
     pub fn sign_timestamp(mut self, signer: &mut dyn Signer)
                           -> Result<Signature>
     {
+        match self.typ {
+            SignatureType::Timestamp => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(signer)?;
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_timestamp(&mut hash)?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_timestamp(&mut hash);
         self.sign(signer, hash.into_digest()?)
     }
 
@@ -753,9 +714,9 @@ impl SignatureBuilder {
     /// Signature], which revokes the certificate.
     ///
     ///   [preferences]: crate::cert::Preferences
-    ///   [Direct Key Signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
-    ///   [Preferred Symmetric Algorithms]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.14
-    ///   [Key Revocation Signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [Direct Key Signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
+    ///   [Preferred Symmetric Algorithms]: https://tools.ietf.org/html/rfc4880#section-5.2.3.7
+    ///   [Key Revocation Signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// This function checks that the [signature type] (passed to
     /// [`SignatureBuilder::new`], set via
@@ -784,9 +745,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -795,7 +756,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -853,12 +814,18 @@ impl SignatureBuilder {
         -> Result<Signature>
     where PK: Into<Option<&'a Key<key::PublicParts, key::PrimaryRole>>>
     {
+        match self.typ {
+            SignatureType::DirectKey => (),
+            SignatureType::KeyRevocation => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(signer)?;
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
+        let mut hash = self.hash_algo().context()?;
         let pk = pk.into().unwrap_or_else(|| signer.public().role_as_primary());
-        self.hash_direct_key(&mut hash, pk)?;
+        self.hash_direct_key(&mut hash, pk);
 
         self.sign(signer, hash.into_digest()?)
     }
@@ -872,7 +839,7 @@ impl SignatureBuilder {
     /// ID` should be associated with the `Certificate`, i.e., that
     /// the binding is authentic.
     ///
-    ///   [User ID certification]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [User ID certification]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// OpenPGP has four types of `User ID` certifications.  They are
     /// intended to express the degree of the signer's conviction,
@@ -885,7 +852,7 @@ impl SignatureBuilder {
     /// This function is also used to create [Certification
     /// Revocations].
     ///
-    ///   [Certification Revocations]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [Certification Revocations]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// This function checks that the [signature type] (passed to
     /// [`SignatureBuilder::new`], set via
@@ -918,9 +885,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -929,7 +896,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -987,13 +954,22 @@ impl SignatureBuilder {
         -> Result<Signature>
         where PK: Into<Option<&'a Key<key::PublicParts, key::PrimaryRole>>>
     {
+        match self.typ {
+            SignatureType::GenericCertification => (),
+            SignatureType::PersonaCertification => (),
+            SignatureType::CasualCertification => (),
+            SignatureType::PositiveCertification => (),
+            SignatureType::CertificationRevocation => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(signer)?;
 
         let key = key.into().unwrap_or_else(|| signer.public().role_as_primary());
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_userid_binding(&mut hash, key, userid)?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_userid_binding(&mut hash, key, userid);
         self.sign(signer, hash.into_digest()?)
     }
 
@@ -1012,7 +988,7 @@ impl SignatureBuilder {
     ///
     /// This function is also used to create subkey revocations.
     ///
-    ///   [subkey binding signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [subkey binding signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///   [`SignatureBuilder::sign_primary_key_binding`]: SignatureBuilder::sign_primary_key_binding()
     ///
     /// This function checks that the [signature type] (passed to
@@ -1042,9 +1018,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -1053,7 +1029,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -1084,7 +1060,7 @@ impl SignatureBuilder {
     ///
     /// // Generate an encryption subkey.
     /// let mut subkey: Key<_, _> =
-    ///     Key6::generate_ecc(false, Curve::Cv25519)?.into();
+    ///     Key4::generate_ecc(false, Curve::Cv25519)?.into();
     /// // Derive a signer.
     /// let mut sk_signer = subkey.clone().into_keypair()?;
     ///
@@ -1093,7 +1069,7 @@ impl SignatureBuilder {
     ///     .sign_subkey_binding(&mut pk_signer, None, &subkey)?;
     ///
     /// let cert = cert.insert_packets(vec![Packet::SecretSubkey(subkey),
-    ///                                    sig.into()])?.0;
+    ///                                    sig.into()])?;
     ///
     /// assert_eq!(cert.with_policy(p, None)?.keys().count(), 2);
     /// # Ok(())
@@ -1106,12 +1082,18 @@ impl SignatureBuilder {
         where Q: key::KeyParts,
               PK: Into<Option<&'a Key<key::PublicParts, key::PrimaryRole>>>,
     {
+        match self.typ {
+            SignatureType::SubkeyBinding => (),
+            SignatureType::SubkeyRevocation => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(signer)?;
 
         let primary = primary.into().unwrap_or_else(|| signer.public().role_as_primary());
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_subkey_binding(&mut hash, primary, subkey)?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_subkey_binding(&mut hash, primary, subkey);
         self.sign(signer, hash.into_digest()?)
     }
 
@@ -1127,9 +1109,9 @@ impl SignatureBuilder {
     /// Signature`] subpacket (set using
     /// [`SignatureBuilder::set_embedded_signature`]).
     ///
-    ///   [primary key binding signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [primary key binding signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///   [`SignatureBuilder::sign_subkey_binding`]: SignatureBuilder::sign_subkey_binding()
-    ///   [`Embedded Signature`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
+    ///   [`Embedded Signature`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
     ///   [`SignatureBuilder::set_embedded_signature`]: SignatureBuilder::set_embedded_signature()
     ///
     /// All subkeys that make signatures of any sort (signature
@@ -1182,9 +1164,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -1193,7 +1175,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -1222,7 +1204,7 @@ impl SignatureBuilder {
     ///
     /// // Generate a signing subkey.
     /// let mut subkey: Key<_, _> =
-    ///     Key6::generate_ecc(true, Curve::Ed25519)?.into();
+    ///     Key4::generate_ecc(true, Curve::Ed25519)?.into();
     /// // Derive a signer.
     /// let mut sk_signer = subkey.clone().into_keypair()?;
     ///
@@ -1235,7 +1217,7 @@ impl SignatureBuilder {
     ///     .sign_subkey_binding(&mut pk_signer, None, &subkey)?;
     ///
     /// let cert = cert.insert_packets(vec![Packet::SecretSubkey(subkey),
-    ///                                    sig.into()])?.0;
+    ///                                    sig.into()])?;
     ///
     /// assert_eq!(cert.with_policy(p, None)?.keys().count(), 2);
     /// # assert_eq!(cert.bad_signatures().count(), 0);
@@ -1250,11 +1232,16 @@ impl SignatureBuilder {
         where P: key::KeyParts,
               Q: key::KeyParts,
     {
+        match self.typ {
+            SignatureType::PrimaryKeyBinding => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(subkey_signer)?;
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_primary_key_binding(&mut hash, primary, subkey)?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_primary_key_binding(&mut hash, primary, subkey);
         self.sign(subkey_signer, hash.into_digest()?)
     }
 
@@ -1267,7 +1254,7 @@ impl SignatureBuilder {
     /// that the User Attribute should be associated with the
     /// Certificate, i.e., that the binding is authentic.
     ///
-    ///   [User ID certification]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    ///   [User ID certification]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// OpenPGP has four types of User Attribute certifications.  They
     /// are intended to express the degree of the signer's conviction.
@@ -1307,9 +1294,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -1318,7 +1305,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -1369,7 +1356,7 @@ impl SignatureBuilder {
     /// // Verify it.
     /// sig.verify_user_attribute_binding(signer.public(), pk, &ua)?;
     ///
-    /// let cert = cert.insert_packets(vec![Packet::from(ua), sig.into()])?.0;
+    /// let cert = cert.insert_packets(vec![Packet::from(ua), sig.into()])?;
     /// assert_eq!(cert.with_policy(p, None)?.user_attributes().count(), 1);
     /// # Ok(())
     /// # }
@@ -1379,13 +1366,22 @@ impl SignatureBuilder {
         -> Result<Signature>
         where PK: Into<Option<&'a Key<key::PublicParts, key::PrimaryRole>>>
     {
+        match self.typ {
+            SignatureType::GenericCertification => (),
+            SignatureType::PersonaCertification => (),
+            SignatureType::CasualCertification => (),
+            SignatureType::PositiveCertification => (),
+            SignatureType::CertificationRevocation => (),
+            SignatureType::Unknown(_) => (),
+            _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
+        }
+
         self = self.pre_sign(signer)?;
 
         let key = key.into().unwrap_or_else(|| signer.public().role_as_primary());
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_user_attribute_binding(&mut hash, key, ua)?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_user_attribute_binding(&mut hash, key, ua);
         self.sign(signer, hash.into_digest()?)
     }
 
@@ -1411,9 +1407,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -1422,18 +1418,18 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     pub fn sign_hash(mut self, signer: &mut dyn Signer,
-                     mut hash: hash::Context)
+                     mut hash: Box<dyn hash::Digest>)
         -> Result<Signature>
     {
         self.hash_algo = hash.algo();
 
         self = self.pre_sign(signer)?;
 
-        self.hash(&mut hash)?;
+        self.hash(&mut hash);
         let mut digest = vec![0u8; hash.digest_size()];
         hash.digest(&mut digest)?;
 
@@ -1480,9 +1476,9 @@ impl SignatureBuilder {
     /// subpacket area and set to the `signer`'s `KeyID` and
     /// `Fingerprint`, respectively.
     ///
-    ///   [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`SignatureBuilder::set_issuer`]: SignatureBuilder::set_issuer()
-    ///   [`Issuer Fingerprint`]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [`Issuer Fingerprint`]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`SignatureBuilder::set_issuer_fingerprint`]: SignatureBuilder::set_issuer_fingerprint()
     ///
     /// Likewise, a [`Signature Creation Time`] subpacket set to the
@@ -1491,7 +1487,7 @@ impl SignatureBuilder {
     /// the [`set_signature_creation_time`] method or the
     /// [`preserve_signature_creation_time`] method.
     ///
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///   [`set_signature_creation_time`]: SignatureBuilder::set_signature_creation_time()
     ///   [`preserve_signature_creation_time`]: SignatureBuilder::preserve_signature_creation_time()
     ///
@@ -1512,12 +1508,12 @@ impl SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// let p = &StandardPolicy::new();
     ///
-    /// let (cert, _) = CertBuilder::new().add_signing_subkey().generate()?;
+    /// let (cert, _) = CertBuilder::new().generate()?;
     ///
-    /// // Get a usable (alive, non-revoked) signing key.
+    /// // Get a usable (alive, non-revoked) certification key.
     /// let key : &Key<_, _> = cert
     ///     .keys().with_policy(p, None)
-    ///     .for_signing().alive().revoked(false).nth(0).unwrap().key();
+    ///     .for_certification().alive().revoked(false).nth(0).unwrap().key();
     /// // Derive a signer.
     /// let mut signer = key.clone().parts_into_secret()?.into_keypair()?;
     ///
@@ -1543,128 +1539,17 @@ impl SignatureBuilder {
             _ => return Err(Error::UnsupportedSignatureType(self.typ).into()),
         }
 
-        self = self.pre_sign(signer)?;
-
         // Hash the message
-        let mut hash =
-            self.hash_algo.context()?.for_signature(self.version());
-        if let Some(salt) = self.sb_version.salt() {
-            hash.update(salt);
-        }
+        let mut hash = self.hash_algo.context()?;
         hash.update(msg.as_ref());
 
-        self.hash(&mut hash)?;
+        self = self.pre_sign(signer)?;
+
+        self.hash(&mut hash);
         let mut digest = vec![0u8; hash.digest_size()];
         hash.digest(&mut digest)?;
 
         self.sign(signer, digest)
-    }
-
-    /// Sets the signature builder's default reference time.
-    ///
-    /// The reference time is used when no time is specified.  The
-    /// reference time is the current time by default and is evaluated
-    /// on demand.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::{Duration, SystemTime};
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::SignatureType;
-    /// use openpgp::packet::prelude::*;
-    ///
-    /// # fn main() -> openpgp::Result<()> {
-    /// #
-    /// // If we don't set a reference time, then the current time is used
-    /// // when the signature is created.
-    /// let sig = SignatureBuilder::new(SignatureType::PositiveCertification);
-    /// let ct = sig.effective_signature_creation_time()?.expect("creation time");
-    /// assert!(SystemTime::now().duration_since(ct).expect("ct is in the past")
-    ///         < Duration::new(1, 0));
-    ///
-    /// // If we set a reference time and don't set a creation time,
-    /// // then that time is used for the creation time.
-    /// let t = std::time::UNIX_EPOCH + Duration::new(1646660000, 0);
-    /// let sig = sig.set_reference_time(t)?;
-    /// assert_eq!(sig.effective_signature_creation_time()?, Some(t));
-    /// # Ok(()) }
-    /// ```
-    pub fn set_reference_time<T>(mut self, reference_time: T) -> Result<Self>
-    where
-        T: Into<Option<SystemTime>>,
-    {
-        let reference_time = reference_time.into();
-
-        // Make sure the time is representable.
-        if let Some(t) = reference_time.clone() {
-            Timestamp::try_from(t)?;
-        }
-
-        self.reference_time = reference_time;
-        Ok(self)
-    }
-
-    /// Returns the signature creation time that would be used if a
-    /// signature were created now.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::{Duration, SystemTime};
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::types::SignatureType;
-    /// use openpgp::packet::prelude::*;
-    ///
-    /// # fn main() -> openpgp::Result<()> {
-    /// #
-    /// // If we don't set a creation time, then the current time is used.
-    /// let sig = SignatureBuilder::new(SignatureType::PositiveCertification);
-    /// let ct = sig.effective_signature_creation_time()?.expect("creation time");
-    /// assert!(SystemTime::now().duration_since(ct).expect("ct is in the past")
-    ///         < Duration::new(1, 0));
-    ///
-    /// // If we set a signature creation time, then we should get it back.
-    /// let t = SystemTime::now() - Duration::new(24 * 60 * 60, 0);
-    /// let sig = sig.set_signature_creation_time(t)?;
-    /// assert!(t.duration_since(
-    ///             sig.effective_signature_creation_time()?.unwrap()).unwrap()
-    ///         < Duration::new(1, 0));
-    /// # Ok(()) }
-    /// ```
-    pub fn effective_signature_creation_time(&self)
-        -> Result<Option<SystemTime>>
-    {
-        use std::time;
-
-        let now = || -> Result<SystemTime> {
-            let rt = self.reference_time.unwrap_or_else(crate::now);
-            // Roundtrip via Timestamp to ensure that the time has the
-            // right resolution and is representable.
-            Ok(SystemTime::from(Timestamp::try_from(rt)?))
-        };
-
-        if ! self.overrode_creation_time {
-            // See if we want to backdate the signature.
-            if let Some(orig) = self.original_creation_time {
-                let now = now()?;
-                let t =
-                    (orig + time::Duration::new(1, 0)).max(
-                        now - time::Duration::new(SIG_BACKDATE_BY, 0));
-
-                if t > now {
-                    return Err(Error::InvalidOperation(
-                        "Cannot create valid signature newer than SignatureBuilder template"
-                            .into()).into());
-                }
-
-                Ok(Some(t))
-            } else {
-                Ok(Some(now()?))
-            }
-        } else {
-            Ok(self.signature_creation_time())
-        }
     }
 
     /// Adjusts signature prior to signing.
@@ -1693,7 +1578,7 @@ impl SignatureBuilder {
     /// # use openpgp::types::SignatureType;
     /// #
     /// # let key: Key<key::SecretParts, key::PrimaryRole>
-    /// #     = Key::from(Key6::generate_ecc(true, Curve::Ed25519)?);
+    /// #     = Key::from(Key4::generate_ecc(true, Curve::Ed25519)?);
     /// # let mut signer = key.into_keypair()?;
     /// let sig = SignatureBuilder::new(SignatureType::Binary)
     ///     .pre_sign(&mut signer)?; // Important for size calculation.
@@ -1712,145 +1597,71 @@ impl SignatureBuilder {
     /// # Ok(()) }
     /// ```
     pub fn pre_sign(mut self, signer: &dyn Signer) -> Result<Self> {
-        let pk = signer.public();
-        self.pk_algo = pk.pk_algo();
-
-        // Set the version.  A Key6 will create a Signature6, a key4
-        // will create a Signature4.  If necessary, generate a salt.
-        // If the salt has been explicitly set, it is not changed.
-        self.sb_version = match (self.sb_version, pk.version()) {
-            (SBVersion::V4 {}, 4) => SBVersion::V4 {},
-            (SBVersion::V6 { .. }, 4) => SBVersion::V4 {},
-            (SBVersion::V4 {}, 6) => {
-                let mut salt = vec![0; self.fields.hash_algo().salt_size()?];
-                crate::crypto::random(&mut salt)?;
-                SBVersion::V6 { salt }
-            },
-            (SBVersion::V6 { salt }, 6) => SBVersion::V6 { salt },
-            (_, n) => return Err(Error::InvalidOperation(
-                format!("Unsupported key version {}", n)).into()),
-        };
-
-        // Update the version in the field's struct.
-        self.fields.version = self.sb_version.to_u8();
+        use std::time;
+        self.pk_algo = signer.public().pk_algo();
 
         // Set the creation time.
         if ! self.overrode_creation_time {
-            if let Some(t) = self.effective_signature_creation_time()? {
-                self = self.set_signature_creation_time(t)?;
-            }
+            self =
+                // See if we want to backdate the signature.
+                if let Some(oct) = self.original_creation_time {
+                    let t =
+                        (oct + time::Duration::new(1, 0)).max(
+                            crate::now() -
+                                time::Duration::new(SIG_BACKDATE_BY, 0));
+
+                    if t > crate::now() {
+                        return Err(Error::InvalidOperation(
+                            "Cannot create valid signature newer than template"
+                                .into()).into());
+                    }
+
+                    self.set_signature_creation_time(t)?
+                } else {
+                    self.set_signature_creation_time(crate::now())?
+                };
         }
 
-        match &self.sb_version {
-            SBVersion::V4 {} => {
-                // Make sure we have an issuer packet.
-                if self.issuers().next().is_none()
-                    && self.issuer_fingerprints().next().is_none()
-                {
-                    self = self.set_issuer(signer.public().keyid())?
-                        .set_issuer_fingerprint(signer.public().fingerprint())?;
-                }
-
-                // Add a salt to v4 signatures to make the signature
-                // unpredictable.
-                let mut salt = [0; 32];
-                crate::crypto::random(&mut salt)?;
-                self = self.set_notation("salt@notations.sequoia-pgp.org",
-                                         salt, None, false)?;
-            },
-            SBVersion::V6 { .. } => {
-                // Make sure we have an issuer fingerprint packet.
-                if self.issuer_fingerprints().next().is_none() {
-                    self = self
-                        .set_issuer_fingerprint(signer.public().fingerprint())?;
-                }
-
-                // In v6 signatures, we have a proper prefix salt.
-            },
+        // Make sure we have an issuer packet.
+        if self.issuers().next().is_none()
+            && self.issuer_fingerprints().next().is_none()
+        {
+            self = self.set_issuer(signer.public().keyid())?
+                .set_issuer_fingerprint(signer.public().fingerprint())?;
         }
+
+        // Add a salt to make the signature unpredictable.
+        let mut salt = [0; 32];
+        crate::crypto::random(&mut salt);
+        self = self.set_notation("salt@notations.sequoia-pgp.org",
+                                 salt, None, false)?;
 
         self.sort();
 
         Ok(self)
     }
 
-    /// Returns the prefix salt.
-    ///
-    /// In OpenPGP v6 signatures, a salt is prefixed to the data
-    /// stream hashed in the signature.  If a v6 signature is
-    /// generated by using a v6 key, then a salt will be added
-    /// automatically.  If a salt has been set explicitly (see
-    /// [`SignatureBuilder::set_prefix_salt`]), this function will
-    /// return the salt.
-    pub fn prefix_salt(&self) -> Option<&[u8]> {
-        match &self.sb_version {
-            SBVersion::V4 {} => None,
-            SBVersion::V6 { salt } => Some(salt),
-        }
-    }
-
-    /// Explicitly sets the prefix salt.
-    ///
-    /// In OpenPGP v6 signatures, a salt is prefixed to the data
-    /// stream hashed in the signature.  If a v6 signature is
-    /// generated by using a v6 key, then a salt will be added
-    /// automatically.  In general, you do not need to call this
-    /// function.
-    ///
-    /// When streaming a signed message, it is useful to explicitly
-    /// set the salt using this function.
-    pub fn set_prefix_salt(mut self, new_salt: Vec<u8>) -> (Self, Option<Vec<u8>>) {
-        let mut old = None;
-
-        self.sb_version = match std::mem::take(&mut self.sb_version) {
-            SBVersion::V4 {} => SBVersion::V6 { salt: new_salt },
-            SBVersion::V6 { salt } => {
-                old = Some(salt);
-                SBVersion::V6 { salt: new_salt }
-            },
-        };
-
-        (self, old)
-    }
-
     fn sign(self, signer: &mut dyn Signer, digest: Vec<u8>)
         -> Result<Signature>
     {
-        // DSA is phased out in RFC9580.
-        #[allow(deprecated)]
-        if matches!(self.sb_version, SBVersion::V6 { .. })
-            && self.fields.pk_algo() == PublicKeyAlgorithm::DSA
-        {
-            return Err(Error::BadSignature(
-                "Version 6 signatures using DSA MUST NOT be created".into())
-                       .into());
-        }
-
         let mpis = signer.sign(self.hash_algo, &digest)?;
-        let v4 = Signature4 {
+
+        Ok(Signature4 {
             common: Default::default(),
             fields: self.fields,
             digest_prefix: [digest[0], digest[1]],
             mpis,
-            computed_digest: digest.into(),
+            computed_digest: Some(digest),
             level: 0,
-            additional_issuers: OnceLock::new(),
-        };
-
-        match self.sb_version {
-            SBVersion::V4 {} => Ok(v4.into()),
-            SBVersion::V6 { salt } =>
-                Ok(Signature6::from_common(v4, salt)?.into())
-        }
+            additional_issuers: Vec::with_capacity(0),
+        }.into())
     }
 }
 
 impl From<Signature> for SignatureBuilder {
     fn from(sig: Signature) -> Self {
         match sig {
-            Signature::V3(sig) => sig.into(),
             Signature::V4(sig) => sig.into(),
-            Signature::V6(sig) => sig.into(),
         }
     }
 }
@@ -1872,18 +1683,10 @@ impl From<Signature4> for SignatureBuilder {
         fields.unhashed_area_mut().remove_all(SubpacketTag::IssuerFingerprint);
 
         SignatureBuilder {
-            reference_time: None,
             overrode_creation_time: false,
             original_creation_time: creation_time,
             fields,
-            sb_version: Default::default(),
         }
-    }
-}
-
-impl From<Signature6> for SignatureBuilder {
-    fn from(sig: Signature6) -> Self {
-        SignatureBuilder::from(sig.common)
     }
 }
 
@@ -1895,7 +1698,7 @@ impl From<Signature6> for SignatureBuilder {
 /// do version-specific operations.  But currently, there aren't any
 /// version-specific methods.
 ///
-///   [version 4]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2
+///   [version 4]: https://tools.ietf.org/html/rfc4880#section-5.2
 ///   [`Signature`]: super::Signature
 #[derive(Clone)]
 pub struct Signature4 {
@@ -1910,14 +1713,9 @@ pub struct Signature4 {
     /// Signature MPIs.
     mpis: mpi::Signature,
 
-    /// The computed digest.
-    ///
     /// When used in conjunction with a one-pass signature, this is the
     /// hash computed over the enclosed message.
-    ///
-    /// This is also set when a signature is successfully verified,
-    /// and on signatures during certificate canonicalization.
-    computed_digest: OnceLock<Vec<u8>>,
+    computed_digest: Option<Vec<u8>>,
 
     /// Signature level.
     ///
@@ -1936,7 +1734,7 @@ pub struct Signature4 {
     /// verifying, because that would mean that verifying a signature
     /// would change the serialized representation, and signature
     /// verification is usually expected to be idempotent.
-    additional_issuers: OnceLock<Vec<KeyHandle>>,
+    additional_issuers: Vec<KeyHandle>,
 }
 assert_send_and_sync!(Signature4);
 
@@ -1949,14 +1747,14 @@ impl fmt::Debug for Signature4 {
             .field("hash_algo", &self.hash_algo())
             .field("hashed_area", self.hashed_area())
             .field("unhashed_area", self.unhashed_area())
-            .field("additional_issuers", &self.additional_issuers())
+            .field("additional_issuers", &self.additional_issuers)
             .field("digest_prefix",
                    &crate::fmt::to_hex(&self.digest_prefix, false))
             .field(
                 "computed_digest",
                 &self
                     .computed_digest
-                    .get()
+                    .as_ref()
                     .map(|hash| crate::fmt::to_hex(&hash[..], false)),
             )
             .field("level", &self.level)
@@ -2017,6 +1815,7 @@ impl Signature4 {
     ///
     /// If you want to sign something, consider using the [`SignatureBuilder`]
     /// interface.
+    ///
     pub fn new(typ: SignatureType, pk_algo: PublicKeyAlgorithm,
                hash_algo: HashAlgorithm, hashed_area: SubpacketArea,
                unhashed_area: SubpacketArea,
@@ -2033,9 +1832,9 @@ impl Signature4 {
             },
             digest_prefix,
             mpis,
-            computed_digest: OnceLock::new(),
+            computed_digest: None,
             level: 0,
-            additional_issuers: OnceLock::new(),
+            additional_issuers: Vec::with_capacity(0),
         }
     }
 
@@ -2072,21 +1871,18 @@ impl Signature4 {
 
     /// Gets the computed hash value.
     ///
-    /// This is set by the [`PacketParser`] when parsing the message,
-    /// during successful verification of signatures, and on
-    /// signatures during certificate canonicalization.
+    /// This is set by the [`PacketParser`] when parsing the message.
     ///
     /// [`PacketParser`]: crate::parse::PacketParser
     pub fn computed_digest(&self) -> Option<&[u8]> {
-        self.computed_digest.get().map(|d| &d[..])
+        self.computed_digest.as_ref().map(|d| &d[..])
     }
 
-    /// Sets the computed hash value, once.
-    ///
-    /// Calling this function a second time has no effect.
-    pub(crate) fn set_computed_digest(&self, hash: Option<Vec<u8>>)
+    /// Sets the computed hash value.
+    pub(crate) fn set_computed_digest(&mut self, hash: Option<Vec<u8>>)
+        -> Option<Vec<u8>>
     {
-        let _ = self.computed_digest.set(hash.unwrap_or_default());
+        ::std::mem::replace(&mut self.computed_digest, hash)
     }
 
     /// Gets the signature level.
@@ -2107,15 +1903,15 @@ impl Signature4 {
         ::std::mem::replace(&mut self.level, level)
     }
 
-    /// Returns whether this signature should be exported.
+    /// Returns whether or not this signature should be exported.
     ///
     /// This checks whether the [`Exportable Certification`] subpacket
     /// is absent or present and 1, and that the signature does not
     /// include any sensitive [`Revocation Key`] (designated revokers)
     /// subpackets.
     ///
-    ///   [`Exportable Certification`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.19
-    ///   [`Revocation Key`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+    ///   [`Exportable Certification`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.11
+    ///   [`Revocation Key`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
     pub fn exportable(&self) -> Result<()> {
         if ! self.exportable_certification().unwrap_or(true) {
             return Err(Error::InvalidOperation(
@@ -2130,206 +1926,6 @@ impl Signature4 {
 
         Ok(())
     }
-
-    /// Returns the additional (i.e. newly discovered) issuers.
-    fn additional_issuers(&self) -> &[KeyHandle] {
-        self.additional_issuers.get().map(|v| v.as_slice()).unwrap_or(&[])
-    }
-}
-
-impl From<Signature3> for SignatureBuilder {
-    fn from(sig: Signature3) -> Self {
-        SignatureBuilder::from(sig.intern)
-    }
-}
-
-/// Holds a v3 Signature packet.
-///
-/// This holds a [version 3] Signature packet.  Normally, you won't
-/// directly work with this data structure, but with the [`Signature`]
-/// enum, which is version agnostic.  An exception is when you need to
-/// do version-specific operations.  But currently, there aren't any
-/// version-specific methods.
-///
-///   [version 3]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2
-///   [`Signature`]: super::Signature
-///
-/// Note: Per [Section 5.2 of RFC 9580], v3 signatures should not be
-/// generated, but they should be accepted.  As such, support for
-/// version 3 signatures is limited to verifying them, but not
-/// generating them.
-///
-/// [Section 5.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2
-
-#[derive(Clone)]
-pub struct Signature3 {
-    pub(crate) intern: Signature4,
-}
-assert_send_and_sync!(Signature3);
-
-impl TryFrom<Signature> for Signature3 {
-    type Error = anyhow::Error;
-
-    fn try_from(sig: Signature) -> Result<Self> {
-        match sig {
-            Signature::V3(sig) => Ok(sig),
-            sig => Err(
-                Error::InvalidArgument(
-                    format!(
-                        "Got a v{}, require a v3 signature",
-                        sig.version()))
-                    .into()),
-        }
-    }
-}
-
-// Yes, Signature3 derefs to Signature4.  This is because Signature
-// derefs to Signature4 so this is the only way to add support for v3
-// sigs without breaking the semver.
-impl Deref for Signature3 {
-    type Target = Signature4;
-
-    fn deref(&self) -> &Self::Target {
-        &self.intern
-    }
-}
-
-impl DerefMut for Signature3 {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.intern
-    }
-}
-
-impl fmt::Debug for Signature3 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Signature3")
-            .field("version", &self.version())
-            .field("typ", &self.typ())
-            .field("pk_algo", &self.pk_algo())
-            .field("hash_algo", &self.hash_algo())
-            .field("hashed_area", self.hashed_area())
-            .field("unhashed_area", self.unhashed_area())
-            .field("additional_issuers", &self.additional_issuers())
-            .field("digest_prefix",
-                   &crate::fmt::to_hex(&self.digest_prefix, false))
-            .field(
-                "computed_digest",
-                &self
-                    .computed_digest
-                    .get()
-                    .map(|hash| crate::fmt::to_hex(&hash[..], false)),
-            )
-            .field("level", &self.level)
-            .field("mpis", &self.mpis)
-            .finish()
-    }
-}
-
-impl PartialEq for Signature3 {
-    /// This method tests for self and other values to be equal, and
-    /// is used by ==.
-    ///
-    /// This method compares the serialized version of the two
-    /// packets.  Thus, the computed values are ignored ([`level`],
-    /// [`computed_digest`]).
-    ///
-    /// [`level`]: Signature3::level()
-    /// [`computed_digest`]: Signature3::computed_digest()
-    fn eq(&self, other: &Signature3) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for Signature3 {}
-
-impl PartialOrd for Signature3 {
-    fn partial_cmp(&self, other: &Signature3) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Signature3 {
-    fn cmp(&self, other: &Signature3) -> Ordering {
-        self.intern.cmp(&other.intern)
-    }
-}
-
-impl std::hash::Hash for Signature3 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        use std::hash::Hash as StdHash;
-        StdHash::hash(&self.intern, state);
-    }
-}
-
-impl Signature3 {
-    /// Creates a new signature packet.
-    ///
-    /// If you want to sign something, consider using the [`SignatureBuilder`]
-    /// interface.
-    ///
-    pub fn new(typ: SignatureType, creation_time: Timestamp,
-               issuer: KeyID,
-               pk_algo: PublicKeyAlgorithm,
-               hash_algo: HashAlgorithm,
-               digest_prefix: [u8; 2],
-               mpis: mpi::Signature) -> Self {
-        let hashed_area = SubpacketArea::new(vec![
-            Subpacket::new(
-                SubpacketValue::SignatureCreationTime(creation_time),
-                true).expect("fits"),
-        ]).expect("fits");
-        let unhashed_area = SubpacketArea::new(vec![
-            Subpacket::new(
-                SubpacketValue::Issuer(issuer),
-                false).expect("fits"),
-        ]).expect("fits");
-
-        let mut sig = Signature4::new(typ,
-                                      pk_algo, hash_algo,
-                                      hashed_area, unhashed_area,
-                                      digest_prefix, mpis);
-        sig.version = 3;
-
-        Signature3 {
-            intern: sig,
-        }
-    }
-
-    /// Gets the public key algorithm.
-    // SigantureFields::pk_algo is private, because we don't want it
-    // available on SignatureBuilder, which also derefs to
-    // &SignatureFields.
-    pub fn pk_algo(&self) -> PublicKeyAlgorithm {
-        self.fields.pk_algo()
-    }
-
-    /// Gets the hash prefix.
-    pub fn digest_prefix(&self) -> &[u8; 2] {
-        &self.digest_prefix
-    }
-
-    /// Gets the signature packet's MPIs.
-    pub fn mpis(&self) -> &mpi::Signature {
-        &self.mpis
-    }
-
-    /// Gets the computed hash value.
-    ///
-    /// This is set by the [`PacketParser`] when parsing the message.
-    ///
-    /// [`PacketParser`]: crate::parse::PacketParser
-    pub fn computed_digest(&self) -> Option<&[u8]> {
-        self.computed_digest.get().map(|d| &d[..])
-    }
-
-    /// Gets the signature level.
-    ///
-    /// A level of 0 indicates that the signature is directly over the
-    /// data, a level of 1 means that the signature is a notarization
-    /// over all level 0 signatures and the data, and so on.
-    pub fn level(&self) -> usize {
-        self.level
-    }
 }
 
 impl crate::packet::Signature {
@@ -2342,17 +1938,12 @@ impl crate::packet::Signature {
     /// authenticates the subpacket), it is typically stored in the
     /// unhashed subpacket area.
     ///
-    ///   [Issuer subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
-    ///   [Issuer Fingerprint subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [Issuer subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
+    ///   [Issuer Fingerprint subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///
     /// This function returns all instances of the Issuer subpacket
     /// and the Issuer Fingerprint subpacket in both the hashed
     /// subpacket area and the unhashed subpacket area.
-    ///
-    /// If you are only looking for the issuer subpackets use
-    /// [`SubpacketAreas::issuers`], or if you are looking only for
-    /// the issuer fingerprint subpackets use
-    /// [`SubpacketAreas::issuer_fingerprints`].
     ///
     /// The issuers are sorted so that the `Fingerprints` come before
     /// `KeyID`s.  The `Fingerprint`s and `KeyID`s are not further
@@ -2392,7 +1983,7 @@ impl crate::packet::Signature {
     /// when comparing two signatures.  This prevents a malicious
     /// party from taking valid signatures, adding subpackets to the
     /// unhashed area, and deriving valid but distinct signatures,
-    /// which could be used to perform a denial-of-service attack.
+    /// which could be used to perform a denial of service attack.
     /// For instance, an attacker could create a lot of signatures,
     /// which need to be validated.  Ignoring the unhashed subpackets
     /// means that we can deduplicate signatures using this predicate.
@@ -2447,7 +2038,7 @@ impl crate::packet::Signature {
     /// when comparing two signatures.  This prevents a malicious
     /// party from taking valid signatures, adding subpackets to the
     /// unhashed area, and deriving valid but distinct signatures,
-    /// which could be used to perform a denial-of-service attack.
+    /// which could be used to perform a denial of service attack.
     /// For instance, an attacker could create a lot of signatures,
     /// which need to be validated.  Ignoring the unhashed subpackets
     /// means that we can deduplicate signatures using this predicate.
@@ -2576,29 +2167,30 @@ impl crate::packet::Signature {
     /// stored in the signature.  Note that we don't do this
     /// automatically when verifying signatures, because that would
     /// change the serialized representation of the signature as a
-    /// side effect of verifying the signature.
+    /// side-effect of verifying the signature.
     pub fn add_missing_issuers(&mut self) -> Result<()> {
-        if self.additional_issuers().is_empty() {
+        if self.additional_issuers.is_empty() {
             return Ok(());
         }
 
-        if self.version() == 3 {
-            return Err(Error::InvalidOperation(
-                "cannot add information to v3 signature".into()).into());
+        /// Makes an authenticated subpacket.
+        fn authenticated_subpacket(v: SubpacketValue) -> Result<Subpacket> {
+            let mut p = Subpacket::new(v, false)?;
+            p.set_authenticated(true);
+            Ok(p)
         }
 
         let issuers = self.get_issuers();
-        for id in self.additional_issuers.take().expect("not empty") {
+        for id in std::mem::replace(&mut self.additional_issuers,
+                                    Vec::with_capacity(0)) {
             if ! issuers.contains(&id) {
                 match id {
                     KeyHandle::KeyID(id) =>
-                        self.unhashed_area_mut().add_internal(
-                            Subpacket::new(SubpacketValue::Issuer(id), false)?,
-                            true)?,
+                        self.unhashed_area_mut().add(authenticated_subpacket(
+                            SubpacketValue::Issuer(id))?)?,
                     KeyHandle::Fingerprint(fp) =>
-                        self.unhashed_area_mut().add_internal(
-                            Subpacket::new(SubpacketValue::IssuerFingerprint(fp), false)?,
-                            true)?,
+                        self.unhashed_area_mut().add(authenticated_subpacket(
+                            SubpacketValue::IssuerFingerprint(fp))?)?,
                 }
             }
         }
@@ -2612,7 +2204,7 @@ impl crate::packet::Signature {
     /// [`Signature::normalized_eq`] may differ in the contents of the
     /// unhashed subpacket areas.  This function merges two signatures
     /// trying hard to incorporate all the information into one
-    /// signature while avoiding denial-of-service attacks by merging
+    /// signature while avoiding denial of service attacks by merging
     /// in bad information.
     ///
     /// The merge strategy is as follows:
@@ -2660,7 +2252,6 @@ impl crate::packet::Signature {
         // area.
         fn eligible(p: &Subpacket) -> bool {
             use SubpacketTag::*;
-            #[allow(deprecated)]
             match p.tag() {
                 SignatureCreationTime
                     | SignatureExpirationTime
@@ -2685,8 +2276,7 @@ impl crate::packet::Signature {
                     | SignatureTarget
                     | PreferredAEADAlgorithms
                     | IntendedRecipient
-                    | ApprovedCertifications
-                    | PreferredAEADCiphersuites
+                    | AttestedCertifications
                     | Reserved(_)
                     => false,
                 Issuer
@@ -2715,8 +2305,9 @@ impl crate::packet::Signature {
         let mut size = 0;
 
         // Start with missing issuer information.
-        for id in self.additional_issuers.take().unwrap_or_default().into_iter()
-            .chain(other.additional_issuers().iter().cloned())
+        for id in std::mem::replace(&mut self.additional_issuers,
+                                    Vec::with_capacity(0)).into_iter()
+            .chain(other.additional_issuers.iter().cloned())
         {
             let p = match id {
                 KeyHandle::KeyID(id) => Subpacket::new(
@@ -2726,7 +2317,7 @@ impl crate::packet::Signature {
             };
 
             let l = p.serialized_len();
-            if size + l <= std::u16::MAX as usize && acc.insert(p) {
+            if size + l <= std::u16::MAX as usize && acc.insert(p.clone()) {
                 size += l;
             }
         }
@@ -2734,7 +2325,8 @@ impl crate::packet::Signature {
         // Make multiple passes over the subpacket areas.  Always
         // start with self, then other.  Only consider eligible
         // packets.  Consider authenticated ones first, then plausible
-        // unauthenticated ones, then the rest.
+        // unauthenticated ones, then the rest.  If inserting fails at
+        // any moment, stop.
         for p in
             self.unhashed_area().iter()
                    .filter(|p| eligible(p) && p.authenticated())
@@ -2768,46 +2360,6 @@ impl crate::packet::Signature {
 ///
 /// <a id="verification-functions"></a>
 impl Signature {
-    /// Verifies the signature using `key`.
-    ///
-    /// Verifies the signature using `key`, using the previously
-    /// computed stored digest (see [`Signature4::computed_digest`]).
-    /// If the computed digest has not been set prior to calling this
-    /// function, it will fail.
-    ///
-    /// Because the context (i.e. what the signature covers) is hashed
-    /// and stored in the computed digest, and not handed in as part
-    /// of the signature verification, this interface must only be
-    /// used if the context can be robustly inferred.
-    ///
-    /// For example, when verifying a third-party certification while
-    /// iterating over user IDs in a certificate, this function can be
-    /// used because the context is the current certificate and user
-    /// ID, and this context has been hashed and the digest stored
-    /// during certificate canonicalization.  On the other hand, when
-    /// verifying a dangling user ID revocation signature, the context
-    /// has to be provided explicitly in a call to
-    /// [`Signature::verify_userid_revocation`].
-    ///
-    /// Note: Due to limited context, this only verifies the
-    /// cryptographic signature, and checks that the key predates the
-    /// signature.  Further constraints on the signature, like
-    /// signature type, creation and expiration time, or signature
-    /// revocations must be checked by the caller.
-    ///
-    /// Likewise, this function does not check whether `key` can make
-    /// valid signatures; it is up to the caller to make sure the key
-    /// is not revoked, not expired, has a valid self-signature, has a
-    /// subkey binding signature (if appropriate), has the signing
-    /// capability, etc.
-    pub fn verify_signature<P, R>(&self, key: &Key<P, R>) -> Result<()>
-        where P: key::KeyParts,
-              R: key::KeyRole,
-    {
-        self.verify_digest_internal(
-            key.parts_as_public().role_as_unspecified(), None)
-    }
-
     /// Verifies the signature against `hash`.
     ///
     /// The `hash` should only be computed over the payload, this
@@ -2819,21 +2371,21 @@ impl Signature {
     /// creation and expiration time, or signature revocations must be
     /// checked by the caller.
     ///
-    /// Likewise, this function does not check whether `key` can make
+    /// Likewise, this function does not check whether `key` can made
     /// valid signatures; it is up to the caller to make sure the key
     /// is not revoked, not expired, has a valid self-signature, has a
     /// subkey binding signature (if appropriate), has the signing
     /// capability, etc.
-    pub fn verify_hash<P, R>(&self, key: &Key<P, R>,
-                             mut hash: hash::Context)
+    pub fn verify_hash<P, R>(&mut self, key: &Key<P, R>,
+                             mut hash: Box<dyn hash::Digest>)
         -> Result<()>
         where P: key::KeyParts,
               R: key::KeyRole,
     {
-        self.hash(&mut hash)?;
-        self.verify_digest_internal(
-            key.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        self.hash(&mut hash);
+        let mut digest = vec![0u8; hash.digest_size()];
+        hash.digest(&mut digest)?;
+        self.verify_digest(key, digest)
     }
 
     /// Verifies the signature against `digest`.
@@ -2844,54 +2396,17 @@ impl Signature {
     /// creation and expiration time, or signature revocations must be
     /// checked by the caller.
     ///
-    /// Likewise, this function does not check whether `key` can make
+    /// Likewise, this function does not check whether `key` can made
     /// valid signatures; it is up to the caller to make sure the key
     /// is not revoked, not expired, has a valid self-signature, has a
     /// subkey binding signature (if appropriate), has the signing
     /// capability, etc.
-    pub fn verify_digest<P, R, D>(&self, key: &Key<P, R>, digest: D)
+    pub fn verify_digest<P, R, D>(&mut self, key: &Key<P, R>, digest: D)
         -> Result<()>
         where P: key::KeyParts,
               R: key::KeyRole,
               D: AsRef<[u8]>,
     {
-        self.verify_digest_internal(
-            key.parts_as_public().role_as_unspecified(),
-            Some(digest.as_ref().into()))
-    }
-
-    /// Verifies the signature against `computed_digest`, or
-    /// `self.computed_digest` if the former is `None`.
-    fn verify_digest_internal(&self,
-                              key: &Key<key::PublicParts, key::UnspecifiedRole>,
-                              computed_digest: Option<Cow<[u8]>>)
-                              -> Result<()>
-    {
-        // Only v6 keys may create v6 signatures.
-        if (self.version() == 6) != (key.version() == 6) {
-            return Err(Error::BadSignature(
-                format!("Signature (v{}) and key (v{}) version mismatch",
-                        self.version(), key.version())).into());
-        }
-
-        // Check salt size.
-        if self.version() == 6 &&
-            Some(self.hash_algo().salt_size()?) != self.salt().map(|s| s.len())
-        {
-            return Err(Error::BadSignature(
-                format!("Salt of size {} bytes is wrong, expected {} bytes ",
-                        self.salt().map(|s| s.len()).unwrap_or(0),
-                        self.hash_algo().salt_size()?)).into());
-        }
-
-        // DSA is phased out in RFC9580.
-        #[allow(deprecated)]
-        if self.version() == 6 && self.pk_algo() == PublicKeyAlgorithm::DSA {
-            return Err(Error::BadSignature(
-                "Version 6 signatures using DSA MUST be rejected".into())
-                       .into());
-        }
-
         if let Some(creation_time) = self.signature_creation_time() {
             if creation_time < key.creation_time() {
                 return Err(Error::BadSignature(
@@ -2903,55 +2418,19 @@ impl Signature {
                 "Signature has no creation time subpacket".into()).into());
         }
 
-        // Either the digest has been given as argument, or it has
-        // been stashed in the signature by the packet parser, or
-        // error out.
-        let digest = computed_digest.as_ref().map(AsRef::as_ref)
-            .or(self.computed_digest())
-            .ok_or_else(|| Error::BadSignature("Hash not computed.".into()))?;
-
-        let result = if let Ok(entry) = cache::Entry::new(
-            self, digest, key.parts_as_public().role_as_unspecified())
-        {
-            if entry.present() {
-                // The signature is good.
-                Ok(())
-            } else {
-                // It's not in the cache.
-
-                let result = key.verify(
-                    self.mpis(), self.hash_algo(), digest);
-
-                // Insert the result in the cache.
-                entry.insert(result.is_ok());
-
-                result
-            }
-        } else {
-            key.verify(self.mpis(), self.hash_algo(), digest)
-        };
-
-        if let Ok(expected_salt_len) = self.hash_algo().salt_size() {
-            let salt_len = self.salt().map(|s| s.len()).unwrap_or(0);
-            if self.version() == 6 && salt_len != expected_salt_len {
-                return Err(Error::BadSignature(format!(
-                    "bad salt length, expected {} got {}",
-                    expected_salt_len, salt_len)).into());
-            }
-        }
-
+        let result = key.verify(self.mpis(), self.hash_algo(), digest.as_ref());
         if result.is_ok() {
             // Mark information in this signature as authenticated.
 
             // The hashed subpackets are authenticated by the
             // signature.
-            self.hashed_area().iter().for_each(|p| {
+            self.hashed_area_mut().iter_mut().for_each(|p| {
                 p.set_authenticated(true);
             });
 
             // The self-authenticating unhashed subpackets are
             // authenticated by the key's identity.
-            self.unhashed_area().iter().for_each(|p| {
+            self.unhashed_area_mut().iter_mut().for_each(|p| {
                 let authenticated = match p.value() {
                     SubpacketValue::Issuer(id) =>
                         id == &key.keyid(),
@@ -2965,27 +2444,16 @@ impl Signature {
             // Compute and record any issuer information not yet
             // contained in the signature.
             let issuers = self.get_issuers();
-            let mut additional_issuers = Vec::with_capacity(0);
-
             let id = KeyHandle::from(key.keyid());
-            if self.version() <= 4 && ! issuers.contains(&id) {
-                additional_issuers.push(id);
+            if ! (issuers.contains(&id)
+                  || self.additional_issuers.contains(&id)) {
+                self.additional_issuers.push(id);
             }
 
-            if self.version() >= 4 {
-                let fp = KeyHandle::from(key.fingerprint());
-                if ! issuers.contains(&fp) {
-                    additional_issuers.push(fp);
-                }
-            }
-
-            // Replace it.  If it was already set, we simply ignore
-            // the error.
-            let _ = self.additional_issuers.set(additional_issuers);
-
-            // Finally, remember the digest.
-            if let Some(digest) = computed_digest {
-                self.set_computed_digest(Some(digest.into_owned()));
+            let fp = KeyHandle::from(key.fingerprint());
+            if ! (issuers.contains(&fp)
+                  || self.additional_issuers.contains(&fp)) {
+                self.additional_issuers.push(fp);
             }
         }
         result
@@ -3005,7 +2473,7 @@ impl Signature {
     /// is not revoked, not expired, has a valid self-signature, has a
     /// subkey binding signature (if appropriate), has the signing
     /// capability, etc.
-    pub fn verify_document<P, R>(&self, key: &Key<P, R>) -> Result<()>
+    pub fn verify<P, R>(&mut self, key: &Key<P, R>) -> Result<()>
         where P: key::KeyParts,
               R: key::KeyRole,
     {
@@ -3014,8 +2482,13 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        self.verify_digest_internal(
-            key.parts_as_public().role_as_unspecified(), None)
+        if let Some(hash) = self.computed_digest.take() {
+            let result = self.verify_digest(key, &hash);
+            self.computed_digest = Some(hash);
+            result
+        } else {
+            Err(Error::BadSignature("Hash not computed.".to_string()).into())
+        }
     }
 
     /// Verifies the standalone signature using `key`.
@@ -3031,7 +2504,7 @@ impl Signature {
     /// is not revoked, not expired, has a valid self-signature, has a
     /// subkey binding signature (if appropriate), has the signing
     /// capability, etc.
-    pub fn verify_standalone<P, R>(&self, key: &Key<P, R>) -> Result<()>
+    pub fn verify_standalone<P, R>(&mut self, key: &Key<P, R>) -> Result<()>
         where P: key::KeyParts,
               R: key::KeyRole,
     {
@@ -3041,11 +2514,9 @@ impl Signature {
 
         // Standalone signatures are like binary-signatures over the
         // zero-sized string.
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_standalone(&mut hash)?;
-        self.verify_digest_internal(key.parts_as_public().role_as_unspecified(),
-                                    Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_standalone(&mut hash);
+        self.verify_digest(key, &hash.into_digest()?[..])
     }
 
     /// Verifies the timestamp signature using `key`.
@@ -3061,7 +2532,7 @@ impl Signature {
     /// is not revoked, not expired, has a valid self-signature, has a
     /// subkey binding signature (if appropriate), has the signing
     /// capability, etc.
-    pub fn verify_timestamp<P, R>(&self, key: &Key<P, R>) -> Result<()>
+    pub fn verify_timestamp<P, R>(&mut self, key: &Key<P, R>) -> Result<()>
         where P: key::KeyParts,
               R: key::KeyRole,
     {
@@ -3071,12 +2542,9 @@ impl Signature {
 
         // Timestamp signatures are like binary-signatures over the
         // zero-sized string.
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_timestamp(&mut hash)?;
-        self.verify_digest_internal(
-            key.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_timestamp(&mut hash);
+        self.verify_digest(key, &hash.into_digest()?[..])
     }
 
     /// Verifies the direct key signature.
@@ -3094,11 +2562,11 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
-    pub fn verify_direct_key<P, Q, R>(&self,
+    pub fn verify_direct_key<P, Q, R>(&mut self,
                                       signer: &Key<P, R>,
                                       pk: &Key<Q, key::PrimaryRole>)
         -> Result<()>
@@ -3110,12 +2578,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_direct_key(&mut hash, pk)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_direct_key(&mut hash, pk);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies the primary key revocation certificate.
@@ -3133,11 +2598,11 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
-    pub fn verify_primary_key_revocation<P, Q, R>(&self,
+    pub fn verify_primary_key_revocation<P, Q, R>(&mut self,
                                                   signer: &Key<P, R>,
                                                   pk: &Key<Q, key::PrimaryRole>)
         -> Result<()>
@@ -3149,12 +2614,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_direct_key(&mut hash, pk)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_direct_key(&mut hash, pk);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies the subkey binding.
@@ -3177,12 +2639,12 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
     pub fn verify_subkey_binding<P, Q, R, S>(
-        &self,
+        &mut self,
         signer: &Key<P, R>,
         pk: &Key<Q, key::PrimaryRole>,
         subkey: &Key<S, key::SubordinateRole>)
@@ -3196,12 +2658,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_subkey_binding(&mut hash, pk, subkey)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))?;
+        let mut hash = self.hash_algo().context()?;
+        self.hash_subkey_binding(&mut hash, pk, subkey);
+        self.verify_digest(signer, &hash.into_digest()?[..])?;
 
         // The signature is good, but we may still need to verify the
         // back sig.
@@ -3209,15 +2668,15 @@ impl Signature {
             let mut last_result = Err(Error::BadSignature(
                 "Primary key binding signature missing".into()).into());
 
-            for backsig in self.subpackets(SubpacketTag::EmbeddedSignature)
+            for backsig in self.subpackets_mut(SubpacketTag::EmbeddedSignature)
             {
                 let result =
                     if let SubpacketValue::EmbeddedSignature(sig) =
-                        backsig.value()
+                        backsig.value_mut()
                 {
                     sig.verify_primary_key_binding(pk, subkey)
                 } else {
-                    unreachable!("subpackets(EmbeddedSignature) returns \
+                    unreachable!("subpackets_mut(EmbeddedSignature) returns \
                                   EmbeddedSignatures");
                 };
                 if result.is_ok() {
@@ -3247,12 +2706,12 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `subkey` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
     pub fn verify_primary_key_binding<P, Q>(
-        &self,
+        &mut self,
         pk: &Key<P, key::PrimaryRole>,
         subkey: &Key<Q, key::SubordinateRole>)
         -> Result<()>
@@ -3263,12 +2722,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_primary_key_binding(&mut hash, pk, subkey)?;
-        self.verify_digest_internal(
-            subkey.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_primary_key_binding(&mut hash, pk, subkey);
+        self.verify_digest(subkey, &hash.into_digest()?[..])
     }
 
     /// Verifies the subkey revocation.
@@ -3286,12 +2742,12 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
     pub fn verify_subkey_revocation<P, Q, R, S>(
-        &self,
+        &mut self,
         signer: &Key<P, R>,
         pk: &Key<Q, key::PrimaryRole>,
         subkey: &Key<S, key::SubordinateRole>)
@@ -3305,12 +2761,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_subkey_binding(&mut hash, pk, subkey)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_subkey_binding(&mut hash, pk, subkey);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies the user id binding.
@@ -3328,11 +2781,11 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
-    pub fn verify_userid_binding<P, Q, R>(&self,
+    pub fn verify_userid_binding<P, Q, R>(&mut self,
                                           signer: &Key<P, R>,
                                           pk: &Key<Q, key::PrimaryRole>,
                                           userid: &UserID)
@@ -3348,12 +2801,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_userid_binding(&mut hash, pk, userid)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_userid_binding(&mut hash, pk, userid);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies the user id revocation certificate.
@@ -3371,11 +2821,11 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
-    pub fn verify_userid_revocation<P, Q, R>(&self,
+    pub fn verify_userid_revocation<P, Q, R>(&mut self,
                                              signer: &Key<P, R>,
                                              pk: &Key<Q, key::PrimaryRole>,
                                              userid: &UserID)
@@ -3388,25 +2838,22 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_userid_binding(&mut hash, pk, userid)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_userid_binding(&mut hash, pk, userid);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
-    /// Verifies an certification approval key signature on a user ID.
+    /// Verifies an attested key signature on a user id.
     ///
     /// This feature is [experimental](crate#experimental-features).
     ///
-    /// Allows the certificate owner to approve of third party
-    /// certifications. See [Certification Approval Key Signature] for
+    /// Allows the certificate owner to attest to third party
+    /// certifications. See [Section 5.2.3.30 of RFC 4880bis] for
     /// details.
     ///
-    /// `self` is the certification approval key signature, `signer`
-    /// is the key that allegedly made the signature, `pk` is the
-    /// primary key, and `userid` is the user ID.
+    /// `self` is the attested key signature, `signer` is the key that
+    /// allegedly made the signature, `pk` is the primary key, and
+    /// `userid` is the user id.
     ///
     /// Note: Due to limited context, this only verifies the
     /// cryptographic signature, checks the signature's type, and
@@ -3415,14 +2862,14 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
     ///
-    ///   [Certification Approval Key Signature]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#name-certification-approval-key-
-    pub fn verify_userid_approval<P, Q, R>(
-        &self,
+    ///   [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    pub fn verify_userid_attestation<P, Q, R>(
+        &mut self,
         signer: &Key<P, R>,
         pk: &Key<Q, key::PrimaryRole>,
         userid: &UserID)
@@ -3431,10 +2878,13 @@ impl Signature {
               Q: key::KeyParts,
               R: key::KeyRole,
     {
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
+        if self.typ() != SignatureType::AttestationKey {
+            return Err(Error::UnsupportedSignatureType(self.typ()).into());
+        }
 
-        if self.approved_certifications()?
+        let mut hash = self.hash_algo().context()?;
+
+        if self.attested_certifications()?
             .any(|d| d.len() != hash.digest_size())
         {
             return Err(Error::BadSignature(
@@ -3442,10 +2892,8 @@ impl Signature {
                        .into());
         }
 
-        self.hash_userid_approval(&mut hash, pk, userid)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        self.hash_userid_binding(&mut hash, pk, userid);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies the user attribute binding.
@@ -3463,11 +2911,11 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
-    pub fn verify_user_attribute_binding<P, Q, R>(&self,
+    pub fn verify_user_attribute_binding<P, Q, R>(&mut self,
                                                   signer: &Key<P, R>,
                                                   pk: &Key<Q, key::PrimaryRole>,
                                                   ua: &UserAttribute)
@@ -3483,12 +2931,9 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_user_attribute_binding(&mut hash, pk, ua)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_user_attribute_binding(&mut hash, pk, ua);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies the user attribute revocation certificate.
@@ -3506,12 +2951,12 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
     pub fn verify_user_attribute_revocation<P, Q, R>(
-        &self,
+        &mut self,
         signer: &Key<P, R>,
         pk: &Key<Q, key::PrimaryRole>,
         ua: &UserAttribute)
@@ -3524,26 +2969,22 @@ impl Signature {
             return Err(Error::UnsupportedSignatureType(self.typ()).into());
         }
 
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        self.hash_user_attribute_binding(&mut hash, pk, ua)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        let mut hash = self.hash_algo().context()?;
+        self.hash_user_attribute_binding(&mut hash, pk, ua);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
-    /// Verifies an certification approval key signature on a user
-    /// attribute.
+    /// Verifies an attested key signature on a user attribute.
     ///
     /// This feature is [experimental](crate#experimental-features).
     ///
-    /// Allows the certificate owner to approve of third party
-    /// certifications. See [Certification Approval Key Signature] for
+    /// Allows the certificate owner to attest to third party
+    /// certifications. See [Section 5.2.3.30 of RFC 4880bis] for
     /// details.
     ///
-    /// `self` is the certification approval key signature, `signer`
-    /// is the key that allegedly made the signature, `pk` is the
-    /// primary key, and `ua` is the user attribute.
+    /// `self` is the attested key signature, `signer` is the key that
+    /// allegedly made the signature, `pk` is the primary key, and
+    /// `ua` is the user attribute.
     ///
     /// Note: Due to limited context, this only verifies the
     /// cryptographic signature, checks the signature's type, and
@@ -3552,14 +2993,14 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
     ///
-    ///   [Certification Approval Key Signature]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#name-certification-approval-key-
-    pub fn verify_user_attribute_approval<P, Q, R>(
-        &self,
+    ///   [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    pub fn verify_user_attribute_attestation<P, Q, R>(
+        &mut self,
         signer: &Key<P, R>,
         pk: &Key<Q, key::PrimaryRole>,
         ua: &UserAttribute)
@@ -3568,10 +3009,13 @@ impl Signature {
               Q: key::KeyParts,
               R: key::KeyRole,
     {
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
+        if self.typ() != SignatureType::AttestationKey {
+            return Err(Error::UnsupportedSignatureType(self.typ()).into());
+        }
 
-        if self.approved_certifications()?
+        let mut hash = self.hash_algo().context()?;
+
+        if self.attested_certifications()?
             .any(|d| d.len() != hash.digest_size())
         {
             return Err(Error::BadSignature(
@@ -3579,10 +3023,8 @@ impl Signature {
                        .into());
         }
 
-        self.hash_user_attribute_approval(&mut hash, pk, ua)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
+        self.hash_user_attribute_binding(&mut hash, pk, ua);
+        self.verify_digest(signer, &hash.into_digest()?[..])
     }
 
     /// Verifies a signature of a message.
@@ -3600,11 +3042,11 @@ impl Signature {
     /// time, or signature revocations must be checked by the caller.
     ///
     /// Likewise, this function does not check whether `signer` can
-    /// make valid signatures; it is up to the caller to make sure the
+    /// made valid signatures; it is up to the caller to make sure the
     /// key is not revoked, not expired, has a valid self-signature,
     /// has a subkey binding signature (if appropriate), has the
     /// signing capability, etc.
-    pub fn verify_message<M, P, R>(&self, signer: &Key<P, R>,
+    pub fn verify_message<M, P, R>(&mut self, signer: &Key<P, R>,
                                    msg: M)
         -> Result<()>
         where M: AsRef<[u8]>,
@@ -3617,29 +3059,14 @@ impl Signature {
         }
 
         // Compute the digest.
-        let mut hash =
-            self.hash_algo().context()?.for_signature(self.version());
-        if let Some(salt) = self.salt() {
-            hash.update(salt);
-        }
+        let mut hash = self.hash_algo().context()?;
+        let mut digest = vec![0u8; hash.digest_size()];
 
         hash.update(msg.as_ref());
-        self.hash(&mut hash)?;
-        self.verify_digest_internal(
-            signer.parts_as_public().role_as_unspecified(),
-            Some(hash.into_digest()?.into()))
-    }
-}
+        self.hash(&mut hash);
+        hash.digest(&mut digest)?;
 
-impl From<Signature3> for Packet {
-    fn from(s: Signature3) -> Self {
-        Packet::Signature(s.into())
-    }
-}
-
-impl From<Signature3> for super::Signature {
-    fn from(s: Signature3) -> Self {
-        super::Signature::V3(s)
+        self.verify_digest(signer, &digest[..])
     }
 }
 
@@ -3658,12 +3085,7 @@ impl From<Signature4> for super::Signature {
 #[cfg(test)]
 impl ArbitraryBounded for super::Signature {
     fn arbitrary_bounded(g: &mut Gen, depth: usize) -> Self {
-        match u8::arbitrary(g) % 3 {
-            0 => Signature3::arbitrary_bounded(g, depth).into(),
-            1 => Signature4::arbitrary_bounded(g, depth).into(),
-            2 => Signature6::arbitrary_bounded(g, depth).into(),
-            _ => unreachable!(),
-        }
+        Signature4::arbitrary_bounded(g, depth).into()
     }
 }
 
@@ -3698,25 +3120,7 @@ impl ArbitraryBounded for Signature4 {
                 s: MPI::arbitrary(g),
             },
 
-            Ed25519 => mpi::Signature::Ed25519 {
-                s: {
-                    let mut s = [0; 64];
-                    s.iter_mut().for_each(|p| *p = u8::arbitrary(g));
-                    Box::new(s)
-                },
-            },
-            Ed448 => mpi::Signature::Ed448 {
-                s: {
-                    let mut s = [0; 114];
-                    s.iter_mut().for_each(|p| *p = u8::arbitrary(g));
-                    Box::new(s)
-                },
-            },
-
-            ElGamalEncryptSign |
-            RSAEncrypt | ElGamalEncrypt | ECDH |
-            X25519 | X448 |
-            Private(_) | Unknown(_) => unreachable!(),
+            _ => unreachable!(),
         };
 
         Signature4 {
@@ -3725,69 +3129,15 @@ impl ArbitraryBounded for Signature4 {
             digest_prefix: [Arbitrary::arbitrary(g),
                             Arbitrary::arbitrary(g)],
             mpis,
-            computed_digest: OnceLock::new(),
+            computed_digest: None,
             level: 0,
-            additional_issuers: OnceLock::new(),
+            additional_issuers: Vec::with_capacity(0),
         }
     }
 }
 
 #[cfg(test)]
 impl_arbitrary_with_bound!(Signature4);
-
-#[cfg(test)]
-impl ArbitraryBounded for Signature3 {
-    fn arbitrary_bounded(g: &mut Gen, _depth: usize) -> Self {
-        use mpi::{arbitrarize, MPI};
-        use PublicKeyAlgorithm::*;
-
-        let pk_algo = PublicKeyAlgorithm::arbitrary_for_signing(g);
-
-        #[allow(deprecated)]
-        let mpis = match pk_algo {
-            RSAEncryptSign | RSASign => mpi::Signature::RSA  {
-                s: MPI::arbitrary(g),
-            },
-
-            DSA => mpi::Signature::DSA {
-                r: MPI::arbitrary(g),
-                s: MPI::arbitrary(g),
-            },
-
-            EdDSA => mpi::Signature::EdDSA  {
-                r: MPI::arbitrary(g),
-                s: MPI::arbitrary(g),
-            },
-
-            ECDSA => mpi::Signature::ECDSA  {
-                r: MPI::arbitrary(g),
-                s: MPI::arbitrary(g),
-            },
-
-            Ed25519 => mpi::Signature::Ed25519  {
-                s: Box::new(arbitrarize(g, [0; 64])),
-            },
-
-            Ed448 => mpi::Signature::Ed448  {
-                s: Box::new(arbitrarize(g, [0; 114])),
-            },
-
-            _ => unreachable!(),
-        };
-
-        Signature3::new(
-            SignatureType::arbitrary(g),
-            Timestamp::arbitrary(g),
-            KeyID::arbitrary(g),
-            pk_algo,
-            HashAlgorithm::arbitrary(g),
-            [Arbitrary::arbitrary(g), Arbitrary::arbitrary(g)],
-            mpis)
-    }
-}
-
-#[cfg(test)]
-impl_arbitrary_with_bound!(Signature3);
 
 #[cfg(test)]
 mod test {
@@ -3797,7 +3147,7 @@ mod test {
     use crate::crypto;
     use crate::parse::Parse;
     use crate::packet::Key;
-    use crate::packet::key::{Key4, Key6};
+    use crate::packet::key::Key4;
     use crate::types::Curve;
     use crate::policy::StandardPolicy as P;
 
@@ -3807,11 +3157,7 @@ mod test {
         use super::*;
 
         use crate::Cert;
-        use crate::parse::{
-            PacketParserBuilder,
-            PacketParserResult,
-            PacketParser,
-        };
+        use crate::parse::{PacketParserResult, PacketParser};
 
         struct Test<'a> {
             key: &'a str,
@@ -3822,17 +3168,17 @@ mod test {
         let tests = [
             Test {
                 key: "neal.pgp",
-                data: "signed-1.pgp",
+                data: "signed-1.gpg",
                 good: 1,
             },
             Test {
                 key: "neal.pgp",
-                data: "signed-1-sha1-neal.pgp",
+                data: "signed-1-sha1-neal.gpg",
                 good: 1,
             },
             Test {
                 key: "testy.pgp",
-                data: "signed-1-sha256-testy.pgp",
+                data: "signed-1-sha256-testy.gpg",
                 good: 1,
             },
             Test {
@@ -3878,12 +3224,12 @@ mod test {
             // Check with the wrong key.
             Test {
                 key: "neal.pgp",
-                data: "signed-1-sha256-testy.pgp",
+                data: "signed-1-sha256-testy.gpg",
                 good: 0,
             },
             Test {
                 key: "neal.pgp",
-                data: "signed-2-partial-body.pgp",
+                data: "signed-2-partial-body.gpg",
                 good: 1,
             },
         ];
@@ -3894,12 +3240,12 @@ mod test {
 
             let cert = Cert::from_bytes(crate::tests::key(test.key)).unwrap();
 
-            if ! cert.keys().all(|ka| ka.key().pk_algo().is_supported()) {
+            if ! cert.keys().all(|k| k.pk_algo().is_supported()) {
                 eprintln!("Skipping because one algorithm is not supported");
                 continue;
             }
 
-            if let Some(curve) = match cert.primary_key().key().mpis() {
+            if let Some(curve) = match cert.primary_key().mpis() {
                 mpi::PublicKey::EdDSA { curve, .. } => Some(curve),
                 mpi::PublicKey::ECDSA { curve, .. } => Some(curve),
                 _ => None,
@@ -3915,7 +3261,8 @@ mod test {
                 crate::tests::message(test.data)).unwrap();
             while let PacketParserResult::Some(mut pp) = ppr {
                 if let Packet::Signature(sig) = &mut pp.packet {
-                    let result = sig.verify_document(cert.primary_key().key()).is_ok();
+                    let result = sig.verify(cert.primary_key().key())
+                        .map(|_| true).unwrap_or(false);
                     eprintln!("  Primary {:?}: {:?}",
                               cert.fingerprint(), result);
                     if result {
@@ -3923,7 +3270,8 @@ mod test {
                     }
 
                     for sk in cert.subkeys() {
-                        let result = sig.verify_document(sk.key()).is_ok();
+                        let result = sig.verify(sk.key())
+                            .map(|_| true).unwrap_or(false);
                         eprintln!("   Subkey {:?}: {:?}",
                                   sk.key().fingerprint(), result);
                         if result {
@@ -3937,42 +3285,6 @@ mod test {
             }
 
             assert_eq!(good, test.good, "Signature verification failed.");
-
-            // Again, this time with explicit hashing.
-            let mut good = 0;
-            let mut ppr = PacketParserBuilder::from_bytes(
-                crate::tests::message(test.data)).unwrap()
-                .automatic_hashing(false)
-                .build().unwrap();
-            while let PacketParserResult::Some(mut pp) = ppr {
-                if let Packet::OnePassSig(_) = &pp.packet {
-                    pp.start_hashing().unwrap();
-                }
-
-                if let Packet::Signature(sig) = &mut pp.packet {
-                    let result = sig.verify_document(cert.primary_key().key()).is_ok();
-                    eprintln!("  Primary {:?}: {:?}",
-                              cert.fingerprint(), result);
-                    if result {
-                        good += 1;
-                    }
-
-                    for sk in cert.subkeys() {
-                        let result = sig.verify_document(sk.key()).is_ok();
-                        eprintln!("   Subkey {:?}: {:?}",
-                                  sk.key().fingerprint(), result);
-                        if result {
-                            good += 1;
-                        }
-                    }
-                }
-
-                // Get the next packet.
-                ppr = pp.recurse().unwrap().1;
-            }
-
-            assert_eq!(good, test.good, "Signature verification with \
-                                         explicit hashing failed.");
         }
     }
 
@@ -3999,8 +3311,8 @@ mod test {
     #[test]
     fn sign_verify() {
         let hash_algo = HashAlgorithm::SHA512;
-        let mut hash = vec![0; hash_algo.digest_size().unwrap()];
-        crypto::random(&mut hash).unwrap();
+        let mut hash = vec![0; hash_algo.context().unwrap().digest_size()];
+        crypto::random(&mut hash);
 
         for key in &[
             "testy-private.pgp",
@@ -4013,12 +3325,12 @@ mod test {
             eprintln!("{}...", key);
             let cert = Cert::from_bytes(crate::tests::key(key)).unwrap();
 
-            if ! cert.primary_key().key().pk_algo().is_supported() {
+            if ! cert.primary_key().pk_algo().is_supported() {
                 eprintln!("Skipping because we don't support the algo");
                 continue;
             }
 
-            if let Some(curve) = match cert.primary_key().key().mpis() {
+            if let Some(curve) = match cert.primary_key().mpis() {
                 mpi::PublicKey::EdDSA { curve, .. } => Some(curve),
                 mpi::PublicKey::ECDSA { curve, .. } => Some(curve),
                 _ => None,
@@ -4035,16 +3347,14 @@ mod test {
                 .expect("secret key is encrypted/missing");
 
             let sig = SignatureBuilder::new(SignatureType::Binary);
-            let hash = hash_algo.context().unwrap()
-                .for_signature(pair.public().version());
+            let hash = hash_algo.context().unwrap();
 
             // Make signature.
-            let sig = sig.sign_hash(&mut pair, hash).unwrap();
+            let mut sig = sig.sign_hash(&mut pair, hash).unwrap();
 
             // Good signature.
-            let mut hash = hash_algo.context().unwrap()
-                .for_signature(sig.version());
-            sig.hash(&mut hash).unwrap();
+            let mut hash = hash_algo.context().unwrap();
+            sig.hash(&mut hash);
             let mut digest = vec![0u8; hash.digest_size()];
             hash.digest(&mut digest).unwrap();
             sig.verify_digest(pair.public(), &digest[..]).unwrap();
@@ -4057,28 +3367,17 @@ mod test {
 
     #[test]
     fn sign_message() {
-        use crate::types::Curve::*;
+        use crate::types::Curve;
 
-        for curve in vec![
-            Ed25519,
-            NistP256,
-            NistP384,
-            NistP521,
-        ] {
-            if ! curve.is_supported() {
-                eprintln!("Skipping unsupported {:?}", curve);
-                continue;
-            }
+        let key: Key<key::SecretParts, key::PrimaryRole>
+            = Key4::generate_ecc(true, Curve::Ed25519)
+            .unwrap().into();
+        let msg = b"Hello, World";
+        let mut pair = key.into_keypair().unwrap();
+        let mut sig = SignatureBuilder::new(SignatureType::Binary)
+            .sign_message(&mut pair, msg).unwrap();
 
-            let key: Key<key::SecretParts, key::PrimaryRole>
-                = Key6::generate_ecc(true, curve).unwrap().into();
-            let msg = b"Hello, World";
-            let mut pair = key.into_keypair().unwrap();
-            let sig = SignatureBuilder::new(SignatureType::Binary)
-                .sign_message(&mut pair, msg).unwrap();
-
-            sig.verify_message(pair.public(), msg).unwrap();
-        }
+        sig.verify_message(pair.public(), msg).unwrap();
     }
 
     #[test]
@@ -4089,30 +3388,7 @@ mod test {
         let p = Packet::from_bytes(
             crate::tests::message("a-cypherpunks-manifesto.txt.ed25519.sig"))
             .unwrap();
-        let sig = if let Packet::Signature(s) = p {
-            s
-        } else {
-            panic!("Expected a Signature, got: {:?}", p);
-        };
-
-        sig.verify_message(cert.primary_key().key(), msg).unwrap();
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn verify_v3_sig() {
-        if ! PublicKeyAlgorithm::DSA.is_supported() {
-            return;
-        }
-
-        let cert = Cert::from_bytes(crate::tests::key(
-                "dennis-simon-anton-private.pgp")).unwrap();
-        let msg = crate::tests::manifesto();
-        let p = Packet::from_bytes(
-            crate::tests::message("a-cypherpunks-manifesto.txt.dennis-simon-anton-v3.sig"))
-            .unwrap();
-        let sig = if let Packet::Signature(s) = p {
-            assert_eq!(s.version(), 3);
+        let mut sig = if let Packet::Signature(s) = p {
             s
         } else {
             panic!("Expected a Signature, got: {:?}", p);
@@ -4136,8 +3412,7 @@ mod test {
 
         let mut pair = key.into_keypair().unwrap();
         let msg = b"Hello, World";
-        let mut hash = HashAlgorithm::SHA256.context().unwrap()
-            .for_signature(pair.public().version());
+        let mut hash = HashAlgorithm::SHA256.context().unwrap();
 
         hash.update(&msg[..]);
 
@@ -4161,7 +3436,7 @@ mod test {
         let test2 = Cert::from_bytes(
             crate::tests::key("test2-signed-by-test1.pgp")).unwrap();
         let uid = test2.userids().with_policy(p, None).next().unwrap();
-        let cert = uid.certifications().next().unwrap().clone();
+        let mut cert = uid.certifications().next().unwrap().clone();
 
         cert.verify_userid_binding(cert_key1,
                                    test2.primary_key().key(),
@@ -4174,15 +3449,13 @@ mod test {
         use crate::packet::signature::subpacket::*;
 
         let key : key::SecretKey
-            = Key6::generate_ecc(true, Curve::Ed25519).unwrap().into();
+            = Key4::generate_ecc(true, Curve::Ed25519).unwrap().into();
         let mut pair = key.into_keypair().unwrap();
         let msg = b"Hello, World";
-        let mut hash = HashAlgorithm::SHA256.context().unwrap()
-            .for_signature(pair.public().version());
+        let mut hash = HashAlgorithm::SHA256.context().unwrap();
         hash.update(&msg[..]);
 
-        let fp =
-            Fingerprint::from_bytes(4, b"bbbbbbbbbbbbbbbbbbbb").unwrap();
+        let fp = Fingerprint::from_bytes(b"bbbbbbbbbbbbbbbbbbbb");
         let keyid = KeyID::from(&fp);
 
         // First, make sure any superfluous subpackets are removed,
@@ -4223,10 +3496,10 @@ mod test {
     #[test]
     fn standalone_signature_roundtrip() {
         let key : key::SecretKey
-            = Key6::generate_ecc(true, Curve::Ed25519).unwrap().into();
+            = Key4::generate_ecc(true, Curve::Ed25519).unwrap().into();
         let mut pair = key.into_keypair().unwrap();
 
-        let sig = SignatureBuilder::new(SignatureType::Standalone)
+        let mut sig = SignatureBuilder::new(SignatureType::Standalone)
             .sign_standalone(&mut pair)
             .unwrap();
 
@@ -4234,7 +3507,6 @@ mod test {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn timestamp_signature() {
         if ! PublicKeyAlgorithm::DSA.is_supported() {
             eprintln!("Skipping test, algorithm is not supported.");
@@ -4245,10 +3517,9 @@ mod test {
             "contrib/gnupg/keys/alpha.pgp")).unwrap();
         let p = Packet::from_bytes(crate::tests::file(
             "contrib/gnupg/timestamp-signature-by-alice.asc")).unwrap();
-        if let Packet::Signature(sig) = p {
-            let mut hash = sig.hash_algo().context().unwrap()
-                .for_signature(sig.version());
-            sig.hash_timestamp(&mut hash).unwrap();
+        if let Packet::Signature(mut sig) = p {
+            let mut hash = sig.hash_algo().context().unwrap();
+            sig.hash_standalone(&mut hash);
             let digest = hash.into_digest().unwrap();
             eprintln!("{}", crate::fmt::hex::encode(&digest));
             sig.verify_timestamp(alpha.primary_key().key()).unwrap();
@@ -4260,10 +3531,10 @@ mod test {
     #[test]
     fn timestamp_signature_roundtrip() {
         let key : key::SecretKey
-            = Key6::generate_ecc(true, Curve::Ed25519).unwrap().into();
+            = Key4::generate_ecc(true, Curve::Ed25519).unwrap().into();
         let mut pair = key.into_keypair().unwrap();
 
-        let sig = SignatureBuilder::new(SignatureType::Timestamp)
+        let mut sig = SignatureBuilder::new(SignatureType::Timestamp)
             .sign_timestamp(&mut pair)
             .unwrap();
 
@@ -4276,7 +3547,7 @@ mod test {
         for f in [
             // This has Fingerprint in the hashed, Issuer in the
             // unhashed area.
-            "messages/sig.pgp",
+            "messages/sig.gpg",
             // This has [Issuer, Fingerprint] in the hashed area.
             "contrib/gnupg/timestamp-signature-by-alice.asc",
         ].iter() {
@@ -4304,22 +3575,25 @@ mod test {
         // Create a certificate and try to update the userid's binding
         // signature.
         let (mut alice, _) =
-            CertBuilder::general_purpose(Some("alice@example.org"))
+            CertBuilder::general_purpose(None, Some("alice@example.org"))
             .generate()?;
         let mut primary_signer = alice.primary_key().key().clone()
             .parts_into_secret()?.into_keypair()?;
         assert_eq!(alice.userids().len(), 1);
         assert_eq!(alice.userids().next().unwrap().self_signatures().count(), 1);
+        let creation_time =
+            alice.userids().next().unwrap().self_signatures().next().unwrap()
+                .signature_creation_time().unwrap();
 
-        const TRIES: u64 = 5;
-        assert!(TRIES * 10 < SIG_BACKDATE_BY);
-        for i in 0..TRIES {
+        for i in 0..2 * SIG_BACKDATE_BY {
             assert_eq!(alice.userids().next().unwrap().self_signatures().count(),
                        1 + i as usize);
 
             // Get the binding signature so that we can modify it.
             let sig = alice.with_policy(p, None)?.userids().next().unwrap()
                 .binding_signature().clone();
+            assert_eq!(sig.signature_creation_time().unwrap(),
+                       creation_time + std::time::Duration::new(i, 0));
 
             let new_sig = match
                 SignatureBuilder::from(sig)
@@ -4329,24 +3603,30 @@ mod test {
                               false)?
                 .sign_userid_binding(&mut primary_signer,
                                      alice.primary_key().component(),
-                                     alice.userids().next().unwrap().userid()) {
+                                     &alice.userids().next().unwrap()) {
                     Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("Failed to make {} signatures on top of \
-                                   the original one.", i);
+                    Err(e) => if i < SIG_BACKDATE_BY {
                         return Err(e); // Not cool.
+                    } else {
+                        assert!(e.to_string().contains(
+                            "Cannot create valid signature newer than \
+                             template"));
+                        return Ok(()); // Cool.
                     },
                 };
 
             // Merge it and check that the new binding signature is
             // the current one.
-            alice = alice.insert_packets(new_sig.clone())?.0;
+            alice = alice.insert_packets(new_sig.clone())?;
             let sig = alice.with_policy(p, None)?.userids().next().unwrap()
                 .binding_signature();
             assert_eq!(sig, &new_sig);
         }
 
-        Ok(())
+        panic!("We were unexpectedly able to update binding signatures {} \
+                times.  This is either a very slow build environment, or \
+                there is a bug.  Please get in contact.",
+               2 * SIG_BACKDATE_BY);
     }
 
     /// Checks that subpackets are marked as authentic on signature
@@ -4457,7 +3737,7 @@ mod test {
             } else {
                 panic!("Expected a subkey");
             };
-        let sig =
+        let mut sig =
             if let Some(Packet::Signature(sig)) = pp.path_ref(&[4]) {
                 sig.clone()
             } else {
@@ -4482,11 +3762,10 @@ mod test {
         use crate::packet::signature::subpacket::*;
 
         let key: key::SecretKey
-            = Key6::generate_ecc(true, Curve::Ed25519)?.into();
+            = Key4::generate_ecc(true, Curve::Ed25519)?.into();
         let mut pair = key.into_keypair()?;
         let msg = b"Hello, World";
-        let mut hash = HashAlgorithm::SHA256.context()?
-            .for_signature(pair.public().version());
+        let mut hash = HashAlgorithm::SHA256.context()?;
         hash.update(&msg[..]);
 
         let fp = pair.public().fingerprint();
@@ -4521,20 +3800,18 @@ mod test {
         // of the deduplicating nature of the merge.
         let merged = sig.clone().merge(malicious.clone())?;
         let issuers = merged.get_issuers();
-        let keyid_issuers = merged.issuers().collect::<Vec<&KeyID>>();
         assert_eq!(issuers.len(), 3);
         assert!(issuers.contains(&KeyHandle::from(&fp)));
-        assert!(keyid_issuers.contains(&&keyid));
-        assert!(keyid_issuers.contains(&&dummy));
+        assert!(issuers.contains(&KeyHandle::from(&keyid)));
+        assert!(issuers.contains(&KeyHandle::from(&dummy)));
 
         // Same, but the other way around.
         let merged = malicious.clone().merge(sig.clone())?;
         let issuers = merged.get_issuers();
-        let keyid_issuers = merged.issuers().collect::<Vec<_>>();
         assert_eq!(issuers.len(), 3);
         assert!(issuers.contains(&KeyHandle::from(&fp)));
-        assert!(keyid_issuers.contains(&&keyid));
-        assert!(keyid_issuers.contains(&&dummy));
+        assert!(issuers.contains(&KeyHandle::from(&keyid)));
+        assert!(issuers.contains(&KeyHandle::from(&dummy)));
 
         // Try to displace the issuer information using garbage
         // packets.
@@ -4558,18 +3835,16 @@ mod test {
         // the merge prefers plausible packets.
         let merged = sig.clone().merge(malicious.clone())?;
         let issuers = merged.get_issuers();
-        let keyid_issuers = merged.issuers().collect::<Vec<_>>();
         assert_eq!(issuers.len(), 2);
         assert!(issuers.contains(&KeyHandle::from(&fp)));
-        assert!(keyid_issuers.contains(&&keyid));
+        assert!(issuers.contains(&KeyHandle::from(&keyid)));
 
         // Same, but the other way around.
         let merged = malicious.clone().merge(sig.clone())?;
         let issuers = merged.get_issuers();
-        let keyid_issuers = merged.issuers().collect::<Vec<_>>();
         assert_eq!(issuers.len(), 2);
         assert!(issuers.contains(&KeyHandle::from(&fp)));
-        assert!(keyid_issuers.contains(&&keyid));
+        assert!(issuers.contains(&KeyHandle::from(&keyid)));
 
         // Try to displace the issuer information by using random keyids.
         let mut malicious = sig.clone();
@@ -4588,45 +3863,20 @@ mod test {
         // This works because the issuer information is being
         // authenticated by the verification, and the merge process
         // prefers authenticated information.
-        let verified = sig.clone();
+        let mut verified = sig.clone();
         verified.verify_hash(pair.public(), hash.clone())?;
 
         let merged = verified.clone().merge(malicious.clone())?;
         let issuers = merged.get_issuers();
-        let keyid_issuers = merged.issuers().collect::<Vec<_>>();
         assert!(issuers.contains(&KeyHandle::from(&fp)));
-        assert!(keyid_issuers.contains(&&keyid));
+        assert!(issuers.contains(&KeyHandle::from(&keyid)));
 
         // Same, but the other way around.
         let merged = malicious.clone().merge(verified.clone())?;
         let issuers = merged.get_issuers();
-        let keyid_issuers = merged.issuers().collect::<Vec<_>>();
         assert!(issuers.contains(&KeyHandle::from(&fp)));
-        assert!(keyid_issuers.contains(&&keyid));
+        assert!(issuers.contains(&KeyHandle::from(&keyid)));
 
-        Ok(())
-    }
-
-    #[test]
-    fn issue_998() -> Result<()> {
-        let now_t = Timestamp::try_from(crate::now())?;
-        let now = SystemTime::from(now_t);
-        let hour = std::time::Duration::new(3600, 0);
-        let hour_t = crate::types::Duration::from(3600);
-        let past = now - 2 * hour;
-
-        let sig = SignatureBuilder::new(SignatureType::PositiveCertification)
-            .modify_hashed_area(|mut a| {
-                a.add(Subpacket::new(
-                    SubpacketValue::SignatureCreationTime(now_t), true)?)?;
-                a.add(Subpacket::new(
-                    SubpacketValue::SignatureExpirationTime(hour_t), true)?)?;
-                Ok(a)
-            })?;
-        let sig = sig.set_reference_time(now)?;
-        assert_eq!(sig.signature_expiration_time(), Some(now + hour));
-        let sig = sig.set_reference_time(past)?;
-        assert_eq!(sig.signature_expiration_time(), Some(now - hour));
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use core::convert::TryFrom;
+use core::convert::{TryFrom, TryInto};
 use std::io;
 use std::sync::Mutex;
 
@@ -23,6 +23,18 @@ impl Clone for Hash {
 }
 
 impl Digest for Hash {
+    fn algo(&self) -> HashAlgorithm {
+        self.0.lock().expect("Mutex not to be poisoned")
+            .hash_algorithm().expect("CNG to not fail internally")
+            .try_into()
+            .expect("We created the object, algo is representable")
+    }
+
+    fn digest_size(&self) -> usize {
+        self.0.lock().expect("Mutex not to be poisoned")
+            .hash_size().expect("CNG to not fail internally")
+    }
+
     fn update(&mut self, data: &[u8]) {
         let _ = self.0.lock().expect("Mutex not to be poisoned").hash(data);
     }
@@ -71,18 +83,7 @@ impl TryFrom<HashAlgorithm> for cng::HashAlgorithmId {
             HashAlgorithm::SHA384 => cng::HashAlgorithmId::Sha384,
             HashAlgorithm::SHA512 => cng::HashAlgorithmId::Sha512,
             HashAlgorithm::MD5 => cng::HashAlgorithmId::Md5,
-
-            // SHA3 support is on the horizon, see
-            // https://blogs.windows.com/windows-insider/2023/03/23/announcing-windows-11-insider-preview-build-25324/
-            HashAlgorithm::SHA3_256 |
-            HashAlgorithm::SHA3_512 =>
-                return Err(Error::UnsupportedHashAlgorithm(value)),
-
-            HashAlgorithm::SHA224 |
-            HashAlgorithm::RipeMD |
-            HashAlgorithm::Private(_) |
-            HashAlgorithm::Unknown(_) =>
-                return Err(Error::UnsupportedHashAlgorithm(value)),
+            algo => Err(Error::UnsupportedHashAlgorithm(algo))?,
         })
     }
 }
@@ -112,16 +113,7 @@ impl HashAlgorithm {
             HashAlgorithm::SHA384 => true,
             HashAlgorithm::SHA512 => true,
             HashAlgorithm::MD5 => true,
-
-            // SHA3 support is on the horizon, see
-            // https://blogs.windows.com/windows-insider/2023/03/23/announcing-windows-11-insider-preview-build-25324/
-            HashAlgorithm::SHA3_256 |
-            HashAlgorithm::SHA3_512 => false,
-
-            HashAlgorithm::SHA224 |
-            HashAlgorithm::RipeMD |
-            HashAlgorithm::Private(_) |
-            HashAlgorithm::Unknown(_) => false,
+            _ => false,
         }
     }
 

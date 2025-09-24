@@ -19,8 +19,6 @@ pub use crate::cert::{
     CertParser,
     CertRevocationBuilder,
     CipherSuite,
-    KeyBuilder,
-    SubkeyBuilder,
     Preferences as _,
     SubkeyRevocationBuilder,
     UserAttributeRevocationBuilder,

@@ -1,9 +1,9 @@
 //! Trims trailing whitespace.
 //!
 //! This filter is used to generate messages using the Cleartext
-//! Signature Framework (see [Section 7.2 of RFC 9580]).
+//! Signature Framework (see [Section 7.1 of RFC 4880]).
 //!
-//!   [Section 7.2 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-7.2
+//!   [Section 7.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-7.1
 
 use std::fmt;
 use std::io;
@@ -33,6 +33,7 @@ pub(super) struct TrailingWSFilter<'a, C: 'a> {
 }
 assert_send_and_sync!(TrailingWSFilter<'_, C> where C);
 
+#[allow(clippy::new_ret_no_self)]
 impl<'a> TrailingWSFilter<'a, Cookie> {
     /// Returns a new filter trimming spaces and tabs from lines.
     pub fn new(inner: Message<'a>, cookie: Cookie)
@@ -51,12 +52,17 @@ impl<'a, C: 'a> TrailingWSFilter<'a, C> {
     ///
     /// Any extra data is buffered.
     ///
-    /// If `done` is set, then flushes any data.
+    /// If `done` is set, then flushes any data, and writes a final
+    /// newline.
     fn write_out(&mut self, other: &[u8], done: bool)
                  -> io::Result<()> {
         // XXX: Currently, we don't mind copying the data.  This
         // could be optimized.
         self.buffer.extend_from_slice(other);
+
+        if done && ! self.buffer.is_empty() && ! self.buffer.ends_with(b"\n") {
+            self.buffer.push(b'\n');
+        }
 
         // Write out all whole lines (i.e. those terminated by a
         // newline).  This is a bit awkward, because we only know that
@@ -64,35 +70,23 @@ impl<'a, C: 'a> TrailingWSFilter<'a, C> {
         let mut last_line: Option<&[u8]> = None;
         for line in self.buffer.split(|b| *b == b'\n') {
             if let Some(mut l) = last_line.take() {
-                let crlf_line_end = l.ends_with(b"\r");
-                if crlf_line_end {
-                    l = &l[..l.len() - 1];
-                }
-
                 // Trim trailing whitespace according to Section 7.1
                 // of RFC4880, i.e. "spaces (0x20) and tabs (0x09)".
                 while Some(&b' ') == l.last() || Some(&b'\t') == l.last() {
                     l = &l[..l.len() - 1];
                 }
 
-                self.inner.write_all(l)?;
-                if crlf_line_end {
+                // To simplify the logic in Signer::write, we emit the
+                // newline in one write.
+                if l.ends_with(b"\r") {
+                    self.inner.write_all(&l[..l.len() - 1])?;
                     self.inner.write_all(b"\r\n")?;
                 } else {
+                    self.inner.write_all(l)?;
                     self.inner.write_all(b"\n")?;
                 }
             }
             last_line = Some(line);
-        }
-
-        if done {
-            if let Some(mut l) = last_line {
-                // Flush the last line.
-                while Some(&b' ') == l.last() || Some(&b'\t') == l.last() {
-                    l = &l[..l.len() - 1];
-                }
-                self.inner.write_all(l)?;
-            }
         }
 
         let new_buffer = last_line.map(|l| l.to_vec())
@@ -190,7 +184,7 @@ mod test {
             // No final newline.
             m.finalize()?;
         }
-        assert_eq!(&buf[..], &b"01234567\n89abcdef"[..]);
+        assert_eq!(&buf[..], &b"01234567\n89abcdef\n"[..]);
 
         Ok(())
     }
@@ -221,7 +215,7 @@ mod test {
             // No final newline.
             m.finalize()?;
         }
-        assert_eq!(&buf[..], &b"0123 4567\n89ab cdef"[..]);
+        assert_eq!(&buf[..], &b"0123 4567\n89ab cdef\n"[..]);
 
         Ok(())
     }
@@ -252,7 +246,7 @@ mod test {
             // No final newline.
             m.finalize()?;
         }
-        assert_eq!(&buf[..], &b"0123\t4567\n89ab\tcdef"[..]);
+        assert_eq!(&buf[..], &b"0123\t4567\n89ab\tcdef\n"[..]);
 
         Ok(())
     }
@@ -283,38 +277,7 @@ mod test {
             // No final newline.
             m.finalize()?;
         }
-        assert_eq!(&buf[..], &b"0123\x0c4567\x0c\n89ab\x0ccdef\x0c"[..]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn one_line() -> Result<()> {
-        let mut buf = Vec::new();
-        {
-            let m = Message::new(&mut buf);
-            let mut m = TrailingWSFilter::new(m, Default::default());
-            m.write_all(b"0123 ")?;
-            m.write_all(b"4567 ")?;
-            m.write_all(b"89ab ")?;
-            m.write_all(b"cdef ")?;
-            m.write_all(b"\n")?;
-            m.finalize()?;
-        }
-        assert_eq!(&buf[..], &b"0123 4567 89ab cdef\n"[..]);
-
-        let mut buf = Vec::new();
-        {
-            let m = Message::new(&mut buf);
-            let mut m = TrailingWSFilter::new(m, Default::default());
-            m.write_all(b"0123 ")?;
-            m.write_all(b"4567 ")?;
-            m.write_all(b"89ab ")?;
-            m.write_all(b"cdef ")?;
-            // No final newline.
-            m.finalize()?;
-        }
-        assert_eq!(&buf[..], &b"0123 4567 89ab cdef"[..]);
+        assert_eq!(&buf[..], &b"0123\x0c4567\x0c\n89ab\x0ccdef\x0c\n"[..]);
 
         Ok(())
     }

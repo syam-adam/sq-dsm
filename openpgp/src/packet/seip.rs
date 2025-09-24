@@ -1,22 +1,19 @@
 //! Symmetrically Encrypted Integrity Protected data packets.
 //!
 //! An encrypted data packet is a container.  See [Section 5.13 of RFC
-//! 9580] for details.
+//! 4880] for details.
 //!
-//! [Section 5.13 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.13
+//! [Section 5.13 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.13
 
 use crate::packet;
 use crate::Packet;
 
-mod v2;
-pub use v2::*;
-
 /// Holds an encrypted data packet.
 ///
 /// An encrypted data packet is a container.  See [Section 5.13 of RFC
-/// 9580] for details.
+/// 4880] for details.
 ///
-/// [Section 5.13 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.13
+/// [Section 5.13 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.13
 ///
 /// # A note on equality
 ///
@@ -36,6 +33,20 @@ pub struct SEIP1 {
 
 assert_send_and_sync!(SEIP1);
 
+impl std::ops::Deref for SEIP1 {
+    type Target = packet::Container;
+    fn deref(&self) -> &Self::Target {
+        &self.container
+    }
+}
+
+impl std::ops::DerefMut for SEIP1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.container
+    }
+}
+
+#[allow(clippy::new_without_default)]
 impl SEIP1 {
     /// Creates a new SEIP1 packet.
     pub fn new() -> Self {
@@ -45,8 +56,6 @@ impl SEIP1 {
         }
     }
 }
-
-impl_processed_body_forwards!(SEIP1);
 
 impl From<SEIP1> for super::SEIP {
     fn from(p: SEIP1) -> Self {

@@ -10,7 +10,7 @@ use openpgp::parse::stream::{
 use openpgp::parse::Parse;
 use openpgp::policy::StandardPolicy;
 use openpgp::types::SymmetricAlgorithm;
-use openpgp::{KeyHandle, Result};
+use openpgp::{Fingerprint, KeyHandle, Result};
 
 use std::io::Write;
 
@@ -31,13 +31,15 @@ impl VerificationHelper for PasswordHelper {
 }
 
 impl DecryptionHelper for PasswordHelper {
-    fn decrypt(
+    fn decrypt<D>(
         &mut self,
         _pkesks: &[PKESK],
         skesks: &[SKESK],
         _sym_algo: Option<SymmetricAlgorithm>,
-        decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
-    ) -> Result<Option<Cert>>
+        mut decrypt: D,
+    ) -> Result<Option<Fingerprint>>
+    where
+        D: FnMut(SymmetricAlgorithm, &SessionKey) -> bool,
     {
         // Finally, try to decrypt using the SKESKs.
         for skesk in skesks {
@@ -125,13 +127,15 @@ impl VerificationHelper for CertHelper<'_> {
 }
 
 impl DecryptionHelper for CertHelper<'_> {
-    fn decrypt(
+    fn decrypt<D>(
         &mut self,
         pkesks: &[PKESK],
         _skesks: &[SKESK],
         sym_algo: Option<SymmetricAlgorithm>,
-        decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
-    ) -> Result<Option<Cert>>
+        mut decrypt: D,
+    ) -> Result<Option<Fingerprint>>
+    where
+        D: FnMut(SymmetricAlgorithm, &SessionKey) -> bool,
     {
         let p = &StandardPolicy::new();
 
@@ -154,8 +158,7 @@ impl DecryptionHelper for CertHelper<'_> {
             .filter_map(|key| {
                 pkesks
                     .iter()
-                    .find(|pkesk| pkesk.recipient().map(
-                        |r| r.aliases(&key.key_handle())).unwrap_or(false))
+                    .find(|pkesk| pkesk.recipient() == &key.keyid())
                     .map(|pkesk| (pkesk, key))
             })
             .find(|(pkesk, key)| {
@@ -168,7 +171,7 @@ impl DecryptionHelper for CertHelper<'_> {
             .map(|(_, key)| key.fingerprint());
 
         match successful_key {
-            Some(_) => Ok(self.recipient.cloned()),
+            Some(key) => Ok(Some(key)),
             None => Err(anyhow::anyhow!("Wrong cert!")),
         }
     }

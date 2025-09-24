@@ -1,237 +1,34 @@
 //! Hold the implementation of [`Signer`] and [`Decryptor`] for [`KeyPair`].
 //!
-//! [`Signer`]: crate::crypto::Signer
-//! [`Decryptor`]: crate::crypto::Decryptor
-//! [`KeyPair`]: crate::crypto::KeyPair
+//! [`Signer`]: super::super::asymmetric::Signer
+//! [`Decryptor`]: super::super::asymmetric::Decryptor
+//! [`KeyPair`]: super::super::asymmetric::KeyPair
 
-use nettle::{
-    curve25519,
-    curve448,
-    dsa,
-    ecc,
-    ecdh,
-    ecdsa,
-    ed25519,
-    ed448,
-    rsa,
-    random::Yarrow,
-};
+use nettle::{curve25519, ecc, ecdh, ecdsa, ed25519, dsa, rsa, random::Yarrow};
 
 use crate::{Error, Result};
 
 use crate::packet::{key, Key};
-use crate::crypto::asymmetric::KeyPair;
-use crate::crypto::backend::interface::Asymmetric;
-use crate::crypto::mpi::{self, MPI, ProtectedMPI, PublicKey};
-use crate::crypto::{
-    SessionKey,
-    mem::Protected,
-};
+use crate::crypto::asymmetric::{KeyPair, Decryptor, Signer};
+use crate::crypto::mpi::{self, MPI, PublicKey};
+use crate::crypto::SessionKey;
 use crate::types::{Curve, HashAlgorithm};
 
-impl Asymmetric for super::Backend {
-    fn supports_algo(algo: PublicKeyAlgorithm) -> bool {
-        use PublicKeyAlgorithm::*;
-        #[allow(deprecated)]
-        match algo {
-            X25519 | Ed25519 |
-            RSAEncryptSign | RSAEncrypt | RSASign | DSA | ECDH | ECDSA | EdDSA
-                => true,
-            X448 | Ed448
-                => curve448::IS_SUPPORTED,
-            ElGamalEncrypt | ElGamalEncryptSign | Private(_) | Unknown(_)
-                => false,
-        }
+impl Signer for KeyPair {
+    fn public(&self) -> &Key<key::PublicParts, key::UnspecifiedRole> {
+        KeyPair::public(self)
     }
 
-    fn supports_curve(curve: &Curve) -> bool {
-        use Curve::*;
-        match curve {
-            NistP256 | NistP384 | NistP521 | Ed25519 | Cv25519
-                => true,
-            BrainpoolP256 | BrainpoolP384 | BrainpoolP512 | Unknown(_)
-                => false,
-        }
-    }
-
-    fn x25519_generate_key() -> Result<(Protected, [u8; 32])> {
-        debug_assert_eq!(curve25519::CURVE25519_SIZE, 32);
-        let mut rng = Yarrow::default();
-        let secret = curve25519::private_key(&mut rng);
-        let mut public = [0; 32];
-        curve25519::mul_g(&mut public, &secret)?;
-        Ok((secret.into(), public))
-    }
-
-    fn x25519_derive_public(secret: &Protected) -> Result<[u8; 32]> {
-        debug_assert_eq!(curve25519::CURVE25519_SIZE, 32);
-        let mut public = [0; 32];
-        curve25519::mul_g(&mut public, secret)?;
-        Ok(public)
-    }
-
-    fn x25519_shared_point(secret: &Protected, public: &[u8; 32])
-                           -> Result<Protected> {
-        debug_assert_eq!(curve25519::CURVE25519_SIZE, 32);
-        let mut s: Protected = vec![0; 32].into();
-        curve25519::mul(&mut s, secret, public)?;
-        Ok(s)
-    }
-
-    fn x448_generate_key() -> Result<(Protected, [u8; 56])> {
-        debug_assert_eq!(curve448::CURVE448_SIZE, 56);
-        if ! curve448::IS_SUPPORTED {
-            return Err(Error::UnsupportedPublicKeyAlgorithm(
-                PublicKeyAlgorithm::Ed448).into());
-        }
-        let mut rng = Yarrow::default();
-        let secret = curve448::private_key(&mut rng);
-        let mut public = [0; 56];
-        curve448::mul_g(&mut public, &secret)?;
-        Ok((secret.into(), public))
-    }
-
-    fn x448_derive_public(secret: &Protected) -> Result<[u8; 56]> {
-        debug_assert_eq!(curve448::CURVE448_SIZE, 56);
-        if ! curve448::IS_SUPPORTED {
-            return Err(Error::UnsupportedPublicKeyAlgorithm(
-                PublicKeyAlgorithm::Ed448).into());
-        }
-        let mut public = [0; 56];
-        curve448::mul_g(&mut public, secret)?;
-        Ok(public)
-    }
-
-    fn x448_shared_point(secret: &Protected, public: &[u8; 56])
-                           -> Result<Protected> {
-        debug_assert_eq!(curve448::CURVE448_SIZE, 56);
-        if ! curve448::IS_SUPPORTED {
-            return Err(Error::UnsupportedPublicKeyAlgorithm(
-                PublicKeyAlgorithm::Ed448).into());
-        }
-        let mut s: Protected = vec![0; 56].into();
-        curve448::mul(&mut s, secret, public)?;
-        Ok(s)
-    }
-
-    fn ed25519_generate_key() -> Result<(Protected, [u8; 32])> {
-        debug_assert_eq!(ed25519::ED25519_KEY_SIZE, 32);
-        let mut rng = Yarrow::default();
-        let mut public = [0; 32];
-        let secret: Protected =
-            ed25519::private_key(&mut rng).into();
-        ed25519::public_key(&mut public, &secret)?;
-        Ok((secret, public))
-    }
-
-    fn ed25519_derive_public(secret: &Protected) -> Result<[u8; 32]> {
-        debug_assert_eq!(ed25519::ED25519_KEY_SIZE, 32);
-        let mut public = [0; 32];
-        ed25519::public_key(&mut public, secret)?;
-        Ok(public)
-    }
-
-    fn ed25519_sign(secret: &Protected, public: &[u8; 32], digest: &[u8])
-                    -> Result<[u8; 64]> {
-        debug_assert_eq!(ed25519::ED25519_KEY_SIZE, 32);
-        debug_assert_eq!(ed25519::ED25519_SIGNATURE_SIZE, 64);
-        let mut sig = [0u8; 64];
-        ed25519::sign(public, secret, digest, &mut sig)?;
-        Ok(sig)
-    }
-
-    fn ed25519_verify(public: &[u8; 32], digest: &[u8], signature: &[u8; 64])
-                      -> Result<bool> {
-        debug_assert_eq!(ed25519::ED25519_KEY_SIZE, 32);
-        debug_assert_eq!(ed25519::ED25519_SIGNATURE_SIZE, 64);
-        Ok(ed25519::verify(public, digest, signature)?)
-    }
-
-    fn ed448_generate_key() -> Result<(Protected, [u8; 57])> {
-        debug_assert_eq!(ed448::ED448_KEY_SIZE, 57);
-        let mut rng = Yarrow::default();
-        let mut public = [0; 57];
-        let secret: Protected =
-            ed448::private_key(&mut rng).into();
-        ed448::public_key(&mut public, &secret)?;
-        Ok((secret, public))
-    }
-
-    fn ed448_derive_public(secret: &Protected) -> Result<[u8; 57]> {
-        debug_assert_eq!(ed448::ED448_KEY_SIZE, 57);
-        let mut public = [0; 57];
-        ed448::public_key(&mut public, secret)?;
-        Ok(public)
-    }
-
-    fn ed448_sign(secret: &Protected, public: &[u8; 57], digest: &[u8])
-                    -> Result<[u8; 114]> {
-        debug_assert_eq!(ed448::ED448_KEY_SIZE, 57);
-        debug_assert_eq!(ed448::ED448_SIGNATURE_SIZE, 114);
-        let mut sig = [0u8; 114];
-        ed448::sign(public, secret, digest, &mut sig)?;
-        Ok(sig)
-    }
-
-    fn ed448_verify(public: &[u8; 57], digest: &[u8], signature: &[u8; 114])
-                      -> Result<bool> {
-        debug_assert_eq!(ed448::ED448_KEY_SIZE, 57);
-        debug_assert_eq!(ed448::ED448_SIGNATURE_SIZE, 114);
-        Ok(ed448::verify(public, digest, signature)?)
-    }
-
-    fn dsa_generate_key(p_bits: usize)
-                        -> Result<(MPI, MPI, MPI, MPI, ProtectedMPI)>
-    {
-        let mut rng = Yarrow::default();
-        let q_bits = if p_bits <= 1024 { 160 } else { 256 };
-        let params = dsa::Params::generate(&mut rng, p_bits, q_bits)?;
-        let (p, q) = params.primes();
-        let g = params.g();
-        let (y, x) = dsa::generate_keypair(&params, &mut rng);
-        Ok((p.into(), q.into(), g.into(), y.as_bytes().into(),
-            x.as_bytes().into()))
-    }
-
-    fn dsa_sign(x: &ProtectedMPI,
-                p: &MPI, q: &MPI, g: &MPI, _y: &MPI,
-                digest: &[u8])
-                -> Result<(MPI, MPI)>
-    {
-        let mut rng = Yarrow::default();
-        let params = dsa::Params::new(p.value(), q.value(), g.value());
-        let secret = dsa::PrivateKey::new(x.value());
-
-        let sig = dsa::sign(&params, &secret, digest, &mut rng)?;
-
-        Ok((MPI::new(&sig.r()), MPI::new(&sig.s())))
-    }
-
-    fn dsa_verify(p: &MPI, q: &MPI, g: &MPI, y: &MPI,
-                  digest: &[u8],
-                  r: &MPI, s: &MPI)
-                  -> Result<bool>
-    {
-        let key = dsa::PublicKey::new(y.value());
-        let params = dsa::Params::new(p.value(), q.value(), g.value());
-        let signature = dsa::Signature::new(r.value(), s.value());
-        Ok(dsa::verify(&params, &key, digest, &signature))
-    }
-}
-
-impl KeyPair {
-    pub(crate) fn sign_backend(&self,
-                               secret: &mpi::SecretKeyMaterial,
-                               hash_algo: HashAlgorithm,
-                               digest: &[u8])
-                               -> Result<mpi::Signature>
+    fn sign(&mut self, hash_algo: HashAlgorithm, digest: &[u8])
+            -> Result<mpi::Signature>
     {
         use crate::PublicKeyAlgorithm::*;
 
         let mut rng = Yarrow::default();
 
-        #[allow(deprecated)]
-        match (self.public().pk_algo(), self.public().mpis(), secret)
+        self.secret().map(|secret| {
+            #[allow(deprecated)]
+            match (self.public().pk_algo(), self.public().mpis(), secret)
         {
             (RSASign,
              &PublicKey::RSA { ref e, ref n },
@@ -246,12 +43,12 @@ impl KeyPair {
                 // The signature has the length of the modulus.
                 let mut sig = vec![0u8; n.value().len()];
 
-                // As described in [Section 5.2.2 and 5.2.3 of RFC 9580],
+                // As described in [Section 5.2.2 and 5.2.3 of RFC 4880],
                 // to verify the signature, we need to encode the
                 // signature data in a PKCS1-v1.5 packet.
                 //
-                //   [Section 5.2.2 and 5.2.3 of RFC 9580]:
-                //   https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.2
+                //   [Section 5.2.2 and 5.2.3 of RFC 4880]:
+                //   https://tools.ietf.org/html/rfc4880#section-5.2.2
                 rsa::sign_digest_pkcs1(&public, &secret, digest,
                                        hash_algo.oid()?,
                                        &mut rng, &mut sig)?;
@@ -259,6 +56,46 @@ impl KeyPair {
                 Ok(mpi::Signature::RSA {
                     s: MPI::new(&sig),
                 })
+            },
+
+            (DSA,
+             &PublicKey::DSA { ref p, ref q, ref g, .. },
+             &mpi::SecretKeyMaterial::DSA { ref x }) => {
+                let params = dsa::Params::new(p.value(), q.value(), g.value());
+                let secret = dsa::PrivateKey::new(x.value());
+
+                let sig = dsa::sign(&params, &secret, digest, &mut rng)?;
+
+                Ok(mpi::Signature::DSA {
+                    r: MPI::new(&sig.r()),
+                    s: MPI::new(&sig.s()),
+                })
+            },
+
+            (EdDSA,
+             &PublicKey::EdDSA { ref curve, ref q },
+             &mpi::SecretKeyMaterial::EdDSA { ref scalar }) => match curve {
+                Curve::Ed25519 => {
+                    let public = q.decode_point(&Curve::Ed25519)?.0;
+
+                    let mut sig = vec![0; ed25519::ED25519_SIGNATURE_SIZE];
+
+                    // Nettle expects the private key to be exactly
+                    // ED25519_KEY_SIZE bytes long but OpenPGP allows leading
+                    // zeros to be stripped.
+                    // Padding has to be unconditional; otherwise we have a
+                    // secret-dependent branch.
+                    let sec = scalar.value_padded(ed25519::ED25519_KEY_SIZE);
+
+                    ed25519::sign(public, &sec[..], digest, &mut sig)?;
+
+                    Ok(mpi::Signature::EdDSA {
+                        r: MPI::new(&sig[..ed25519::ED25519_KEY_SIZE]),
+                        s: MPI::new(&sig[ed25519::ED25519_KEY_SIZE..]),
+                    })
+                },
+                _ => Err(
+                    Error::UnsupportedEllipticCurve(curve.clone()).into()),
             },
 
             (ECDSA,
@@ -292,18 +129,24 @@ impl KeyPair {
                 "unsupported combination of algorithm {:?}, key {:?}, \
                  and secret key {:?}",
                 pk_algo, self.public(), self.secret())).into()),
-        }
+        }})
     }
 }
 
-impl KeyPair {
-    pub(crate) fn decrypt_backend(&self, secret: &mpi::SecretKeyMaterial, ciphertext: &mpi::Ciphertext,
+impl Decryptor for KeyPair {
+    fn public(&self) -> &Key<key::PublicParts, key::UnspecifiedRole> {
+        KeyPair::public(self)
+    }
+
+    fn decrypt(&mut self, ciphertext: &mpi::Ciphertext,
                plaintext_len: Option<usize>)
                -> Result<SessionKey>
     {
         use crate::PublicKeyAlgorithm::*;
 
-        Ok(match (self.public().mpis(), secret, ciphertext) {
+        self.secret().map(
+            |secret| Ok(match (self.public().mpis(), secret, ciphertext)
+        {
             (PublicKey::RSA{ ref e, ref n },
              mpi::SecretKeyMaterial::RSA{ ref p, ref q, ref d, .. },
              mpi::Ciphertext::RSA{ ref c }) => {
@@ -325,31 +168,28 @@ impl KeyPair {
 
             (PublicKey::ElGamal{ .. },
              mpi::SecretKeyMaterial::ElGamal{ .. },
-             mpi::Ciphertext::ElGamal{ .. }) => {
-                #[allow(deprecated)]
+             mpi::Ciphertext::ElGamal{ .. }) =>
                 return Err(
-                    Error::UnsupportedPublicKeyAlgorithm(ElGamalEncrypt).into());
-            },
+                    Error::UnsupportedPublicKeyAlgorithm(ElGamalEncrypt).into()),
 
             (PublicKey::ECDH{ .. },
              mpi::SecretKeyMaterial::ECDH { .. },
              mpi::Ciphertext::ECDH { .. }) =>
-                crate::crypto::ecdh::decrypt(self.public(), secret, ciphertext,
-                                             plaintext_len)?,
+                crate::crypto::ecdh::decrypt(self.public(), secret, ciphertext)?,
 
             (public, secret, ciphertext) =>
                 return Err(Error::InvalidOperation(format!(
                     "unsupported combination of key pair {:?}/{:?} \
                      and ciphertext {:?}",
                     public, secret, ciphertext)).into()),
-        })
+        }))
     }
 }
 
 
 impl<P: key::KeyParts, R: key::KeyRole> Key<P, R> {
     /// Encrypts the given data with this key.
-    pub(crate) fn encrypt_backend(&self, data: &SessionKey) -> Result<mpi::Ciphertext> {
+    pub fn encrypt(&self, data: &SessionKey) -> Result<mpi::Ciphertext> {
         use crate::PublicKeyAlgorithm::*;
 
         #[allow(deprecated)]
@@ -382,41 +222,72 @@ impl<P: key::KeyParts, R: key::KeyRole> Key<P, R> {
                     },
                 }
             },
-
             ECDH => crate::crypto::ecdh::encrypt(self.parts_as_public(),
                                                  data),
-
-            RSASign | DSA | ECDSA | EdDSA | Ed25519 | Ed448 =>
-                Err(Error::InvalidOperation(
-                    format!("{} is not an encryption algorithm", self.pk_algo())
-                ).into()),
-
-            X25519 | // Handled in common code.
-            X448 | // Handled in common code.
-            ElGamalEncrypt | ElGamalEncryptSign |
-            Private(_) | Unknown(_) =>
-                Err(Error::UnsupportedPublicKeyAlgorithm(self.pk_algo()).into()),
+            algo => Err(Error::UnsupportedPublicKeyAlgorithm(algo).into()),
         }
     }
 
     /// Verifies the given signature.
-    pub(crate) fn verify_backend(&self, sig: &mpi::Signature, hash_algo: HashAlgorithm,
+    pub fn verify(&self, sig: &mpi::Signature, hash_algo: HashAlgorithm,
                   digest: &[u8]) -> Result<()>
     {
         use crate::crypto::mpi::Signature;
+
+        fn bad(e: impl ToString) -> anyhow::Error {
+            Error::BadSignature(e.to_string()).into()
+        }
 
         let ok = match (self.mpis(), sig) {
             (PublicKey::RSA { e, n }, Signature::RSA { s }) => {
                 let key = rsa::PublicKey::new(n.value(), e.value())?;
 
-                // As described in [Section 5.2.2 and 5.2.3 of RFC 9580],
+                // As described in [Section 5.2.2 and 5.2.3 of RFC 4880],
                 // to verify the signature, we need to encode the
                 // signature data in a PKCS1-v1.5 packet.
                 //
-                //   [Section 5.2.2 and 5.2.3 of RFC 9580]:
-                //   https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.2
+                //   [Section 5.2.2 and 5.2.3 of RFC 4880]:
+                //   https://tools.ietf.org/html/rfc4880#section-5.2.2
                 rsa::verify_digest_pkcs1(&key, digest, hash_algo.oid()?,
                                          s.value())?
+            },
+            (PublicKey::DSA { y, p, q, g }, Signature::DSA { s, r }) => {
+                let key = dsa::PublicKey::new(y.value());
+                let params = dsa::Params::new(p.value(), q.value(), g.value());
+                let signature = dsa::Signature::new(r.value(), s.value());
+
+                dsa::verify(&params, &key, digest, &signature)
+            },
+            (PublicKey::EdDSA { curve, q }, Signature::EdDSA { r, s }) =>
+              match curve {
+                Curve::Ed25519 => {
+                    if q.value().get(0).map(|&b| b != 0x40).unwrap_or(true) {
+                        return Err(Error::MalformedPacket(
+                            "Invalid point encoding".into()).into());
+                    }
+
+                    // OpenPGP encodes R and S separately, but our
+                    // cryptographic library expects them to be
+                    // concatenated.
+                    let mut signature =
+                        Vec::with_capacity(ed25519::ED25519_SIGNATURE_SIZE);
+
+                    // We need to zero-pad them at the front, because
+                    // the MPI encoding drops leading zero bytes.
+                    let half = ed25519::ED25519_SIGNATURE_SIZE / 2;
+                    signature.extend_from_slice(
+                        &r.value_padded(half).map_err(bad)?);
+                    signature.extend_from_slice(
+                        &s.value_padded(half).map_err(bad)?);
+
+                    // Let's see if we got it right.
+                    assert_eq!(signature.len(),
+                               ed25519::ED25519_SIGNATURE_SIZE);
+
+                    ed25519::verify(&q.value()[1..], digest, &signature)?
+                },
+                _ => return
+                    Err(Error::UnsupportedEllipticCurve(curve.clone()).into()),
             },
             (PublicKey::ECDSA { curve, q }, Signature::ECDSA { s, r }) =>
             {
@@ -446,17 +317,76 @@ impl<P: key::KeyParts, R: key::KeyRole> Key<P, R> {
 }
 
 use std::time::SystemTime;
+use crate::crypto::mem::Protected;
 use crate::packet::key::{Key4, SecretParts};
-use crate::types::PublicKeyAlgorithm;
+use crate::types::{PublicKeyAlgorithm, SymmetricAlgorithm};
 
 impl<R> Key4<SecretParts, R>
     where R: key::KeyRole,
 {
-    /// Creates a new OpenPGP secret key packet for an existing RSA key.
+
+    /// Creates a new OpenPGP secret key packet for an existing X25519 key.
     ///
-    /// The RSA key will use the secret exponent `d`, derived from the
-    /// secret primes `p` and `q`.  The key will have its creation
-    /// date set to `ctime` or the current time if `None` is given.
+    /// The ECDH key will use hash algorithm `hash` and symmetric
+    /// algorithm `sym`.  If one or both are `None` secure defaults
+    /// will be used.  The key will have it's creation date set to
+    /// `ctime` or the current time if `None` is given.
+    pub fn import_secret_cv25519<H, S, T>(private_key: &[u8],
+                                          hash: H, sym: S, ctime: T)
+        -> Result<Self> where H: Into<Option<HashAlgorithm>>,
+                              S: Into<Option<SymmetricAlgorithm>>,
+                              T: Into<Option<SystemTime>>
+    {
+        let mut public_key = [0; curve25519::CURVE25519_SIZE];
+        curve25519::mul_g(&mut public_key, private_key).unwrap();
+
+        let mut private_key = Vec::from(private_key);
+        private_key.reverse();
+
+        Self::with_secret(
+            ctime.into().unwrap_or_else(crate::now),
+            PublicKeyAlgorithm::ECDH,
+            mpi::PublicKey::ECDH {
+                curve: Curve::Cv25519,
+                hash: hash.into().unwrap_or(HashAlgorithm::SHA512),
+                sym: sym.into().unwrap_or(SymmetricAlgorithm::AES256),
+                q: MPI::new_compressed_point(&public_key),
+            },
+            mpi::SecretKeyMaterial::ECDH {
+                scalar: private_key.into(),
+            }.into())
+    }
+
+    /// Creates a new OpenPGP secret key packet for an existing Ed25519 key.
+    ///
+    /// The ECDH key will use hash algorithm `hash` and symmetric
+    /// algorithm `sym`.  If one or both are `None` secure defaults
+    /// will be used.  The key will have it's creation date set to
+    /// `ctime` or the current time if `None` is given.
+    pub fn import_secret_ed25519<T>(private_key: &[u8], ctime: T)
+        -> Result<Self> where T: Into<Option<SystemTime>>
+    {
+        let mut public_key = [0; ed25519::ED25519_KEY_SIZE];
+        ed25519::public_key(&mut public_key, private_key).unwrap();
+
+        Self::with_secret(
+            ctime.into().unwrap_or_else(crate::now),
+            PublicKeyAlgorithm::EdDSA,
+            mpi::PublicKey::EdDSA {
+                curve: Curve::Ed25519,
+                q: MPI::new_compressed_point(&public_key),
+            },
+            mpi::SecretKeyMaterial::EdDSA {
+                scalar: mpi::MPI::new(private_key).into(),
+            }.into())
+    }
+
+    /// Creates a new OpenPGP public key packet for an existing RSA key.
+    ///
+    /// The RSA key will use public exponent `e` and modulo `n`. The key will
+    /// have its creation date set to `ctime` or the current time if `None`
+    /// is given.
+    #[allow(clippy::many_single_char_names)]
     pub fn import_secret_rsa<T>(d: &[u8], p: &[u8], q: &[u8], ctime: T)
         -> Result<Self> where T: Into<Option<SystemTime>>
     {
@@ -472,10 +402,41 @@ impl<R> Key4<SecretParts, R>
                 n: mpi::MPI::new(&key.n()[..]),
             },
             mpi::SecretKeyMaterial::RSA {
-                d: d.into(),
-                p: a.into(),
-                q: b.into(),
-                u: c.into(),
+                d: mpi::MPI::new(d).into(),
+                p: mpi::MPI::new(&a[..]).into(),
+                q: mpi::MPI::new(&b[..]).into(),
+                u: mpi::MPI::new(&c[..]).into(),
+            }.into())
+    }
+
+    /// Creates a new OpenPGP public key packet for an existing RSA key.
+    ///
+    /// Like import_secret_rsa but uses the given public exponent `e`.
+    ///
+    /// Note that import_secret_rsa computes e such that ed == 1 mod phi(n), but
+    /// most standards (e.g. RFC3447, referenced by RFC4880 as ultimate
+    /// authority for PKCS#1) dictate ed == 1 mod lambda(n).
+    #[allow(clippy::many_single_char_names)]
+    pub fn import_secret_rsa_unchecked_e<T>(
+        e: &[u8], d: &[u8], p: &[u8], q: &[u8], ctime: T
+    ) -> Result<Self> where T: Into<Option<SystemTime>>
+    {
+        let sec = rsa::PrivateKey::new(d, p, q, None)?;
+        let key = sec.public_key()?;
+        let (a, b, c) = sec.as_rfc4880();
+
+        Self::with_secret(
+            ctime.into().unwrap_or_else(crate::now),
+            PublicKeyAlgorithm::RSAEncryptSign,
+            mpi::PublicKey::RSA {
+                e: mpi::MPI::new(e),
+                n: mpi::MPI::new(&key.n()[..]),
+            },
+            mpi::SecretKeyMaterial::RSA {
+                d: mpi::MPI::new(d).into(),
+                p: mpi::MPI::new(&a[..]).into(),
+                q: mpi::MPI::new(&b[..]).into(),
+                u: mpi::MPI::new(&c[..]).into(),
             }.into())
     }
 
@@ -490,10 +451,10 @@ impl<R> Key4<SecretParts, R>
             n: MPI::new(&*public.n()),
         };
         let private_mpis = mpi::SecretKeyMaterial::RSA {
-            d: private.d().into(),
-            p: p.into(),
-            q: q.into(),
-            u: u.into(),
+            d: MPI::new(&*private.d()).into(),
+            p: MPI::new(&*p).into(),
+            q: MPI::new(&*q).into(),
+            u: MPI::new(&*u).into(),
         };
 
         Self::with_secret(
@@ -509,19 +470,53 @@ impl<R> Key4<SecretParts, R>
     /// EdDSA or ECDSA key is generated.  Giving `for_signing == true` and
     /// `curve == Cv25519` will produce an error. Likewise
     /// `for_signing == false` and `curve == Ed25519` will produce an error.
-    pub(crate) fn generate_ecc_backend(for_signing: bool, curve: Curve)
-                                       -> Result<(PublicKeyAlgorithm,
-                                                  mpi::PublicKey,
-                                                  mpi::SecretKeyMaterial)>
-    {
+    pub fn generate_ecc(for_signing: bool, curve: Curve) -> Result<Self> {
+        use crate::PublicKeyAlgorithm::*;
+
         let mut rng = Yarrow::default();
 
-        match (curve.clone(), for_signing) {
-            (Curve::Ed25519, true) =>
-                unreachable!("handled in Key4::generate_ecc"),
+        let (mpis, secret, pk_algo) = match (curve.clone(), for_signing) {
+            (Curve::Ed25519, true) => {
+                let mut public = [0; ed25519::ED25519_KEY_SIZE];
+                let private: Protected =
+                    ed25519::private_key(&mut rng).into();
+                ed25519::public_key(&mut public, &private)?;
 
-            (Curve::Cv25519, false) =>
-                unreachable!("handled in Key4::generate_ecc"),
+                let public_mpis = PublicKey::EdDSA {
+                    curve: Curve::Ed25519,
+                    q: MPI::new_compressed_point(&public),
+                };
+                let private_mpis = mpi::SecretKeyMaterial::EdDSA {
+                    scalar: private.into(),
+                };
+                let sec = private_mpis.into();
+
+                (public_mpis, sec, EdDSA)
+            }
+
+            (Curve::Cv25519, false) => {
+                let mut public = [0; curve25519::CURVE25519_SIZE];
+                let mut private: Protected =
+                    curve25519::private_key(&mut rng).into();
+                curve25519::mul_g(&mut public, &private)?;
+
+                // Reverse the scalar.  See
+                // https://lists.gnupg.org/pipermail/gnupg-devel/2018-February/033437.html.
+                private.reverse();
+
+                let public_mpis = PublicKey::ECDH {
+                    curve: Curve::Cv25519,
+                    q: MPI::new_compressed_point(&public),
+                    hash: HashAlgorithm::SHA256,
+                    sym: SymmetricAlgorithm::AES256,
+                };
+                let private_mpis = mpi::SecretKeyMaterial::ECDH {
+                    scalar: private.into(),
+                };
+                let sec = private_mpis.into();
+
+                (public_mpis, sec, ECDH)
+            }
 
             (Curve::NistP256, true)  | (Curve::NistP384, true)
             | (Curve::NistP521, true) => {
@@ -549,53 +544,61 @@ impl<R> Key4<SecretParts, R>
                     q: MPI::new_point(&pub_x, &pub_y, field_sz),
                 };
                 let private_mpis = mpi::SecretKeyMaterial::ECDSA{
-                    scalar: private.as_bytes().into(),
+                    scalar: MPI::new(&private.as_bytes()).into(),
                 };
+                let sec = private_mpis.into();
 
-                Ok((PublicKeyAlgorithm::ECDSA, public_mpis, private_mpis))
+                (public_mpis, sec, ECDSA)
             }
 
             (Curve::NistP256, false)  | (Curve::NistP384, false)
             | (Curve::NistP521, false) => {
-                    let (private, field_sz) = match curve {
+                    let (private, hash, field_sz) = match curve {
                         Curve::NistP256 => {
                             let pv =
                                 ecc::Scalar::new_random::<ecc::Secp256r1, _>(&mut rng);
 
-                            (pv, 256)
+                            (pv, HashAlgorithm::SHA256, 256)
                         }
                         Curve::NistP384 => {
                             let pv =
                                 ecc::Scalar::new_random::<ecc::Secp384r1, _>(&mut rng);
 
-                            (pv, 384)
+                            (pv, HashAlgorithm::SHA384, 384)
                         }
                         Curve::NistP521 => {
                             let pv =
                                 ecc::Scalar::new_random::<ecc::Secp521r1, _>(&mut rng);
 
-                            (pv, 521)
+                            (pv, HashAlgorithm::SHA512, 521)
                         }
                         _ => unreachable!(),
                     };
                     let public = ecdh::point_mul_g(&private);
                     let (pub_x, pub_y) = public.as_bytes();
                     let public_mpis = mpi::PublicKey::ECDH{
-                        q: MPI::new_point(&pub_x, &pub_y, field_sz),
-                        hash:
-                        crate::crypto::ecdh::default_ecdh_kdf_hash(&curve),
-                        sym:
-                        crate::crypto::ecdh::default_ecdh_kek_cipher(&curve),
                         curve,
+                        q: MPI::new_point(&pub_x, &pub_y, field_sz),
+                        hash,
+                        sym: SymmetricAlgorithm::AES256,
                     };
                     let private_mpis = mpi::SecretKeyMaterial::ECDH{
-                        scalar: private.as_bytes().into(),
+                        scalar: MPI::new(&private.as_bytes()).into(),
                     };
+                    let sec = private_mpis.into();
 
-                    Ok((PublicKeyAlgorithm::ECDH, public_mpis, private_mpis))
+                    (public_mpis, sec, ECDH)
                 }
 
-            _ => Err(Error::UnsupportedEllipticCurve(curve).into()),
-        }
+            (cv, _) => {
+                return Err(Error::UnsupportedEllipticCurve(cv).into());
+            }
+        };
+
+        Self::with_secret(
+            crate::now(),
+            pk_algo,
+            mpis,
+            secret)
     }
 }

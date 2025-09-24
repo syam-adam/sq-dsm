@@ -4,9 +4,9 @@
 //! called subpackets.  These subpackets are used to indicate when a
 //! signature was created, who created the signature, user &
 //! implementation preferences, etc.  The full details are in [Section
-//! 5.2.3.7 of RFC 9580].
+//! 5.2.3.1 of RFC 4880].
 //!
-//! [Section 5.2.3.7 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.7
+//! [Section 5.2.3.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.1
 //!
 //! The standard assigns each subpacket a numeric id, and describes
 //! the format of its value.  One subpacket is called Notation Data
@@ -35,7 +35,7 @@
 //! # use openpgp::Packet;
 //! # use openpgp::parse::{Parse, PacketParserResult, PacketParser};
 //! #
-//! # f(include_bytes!("../../../tests/data/messages/signed.pgp"));
+//! # f(include_bytes!("../../../tests/data/messages/signed.gpg"));
 //! #
 //! # fn f(message_data: &[u8]) -> Result<()> {
 //! let mut ppr = PacketParser::from_bytes(message_data)?;
@@ -53,13 +53,15 @@
 //! # }
 //! ```
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::convert::{TryInto, TryFrom};
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 use std::ops::{Deref, DerefMut};
 use std::fmt;
 use std::cmp;
-use std::sync::atomic;
 use std::time;
 
 #[cfg(test)]
@@ -93,42 +95,49 @@ use crate::types::{
     SymmetricAlgorithm,
     Timestamp,
 };
-
-/// The default amount of tolerance to use when comparing
-/// some timestamps.
-///
-/// Used by `Subpacket::signature_alive`.
-///
-/// When determining whether a timestamp generated on another
-/// machine is valid *now*, we need to account for clock skew.
-/// (Note: you don't normally need to consider clock skew when
-/// evaluating a signature's validity at some time in the past.)
-///
-/// We tolerate half an hour of skew based on the following
-/// anecdote: In 2019, a developer using Sequoia in a Windows VM
-/// running inside Virtual Box on Mac OS X reported that he
-/// typically observed a few minutes of clock skew and
-/// occasionally saw over 20 minutes of clock skew.
-///
-/// Note: when new messages override older messages, and their
-/// signatures are evaluated at some arbitrary point in time, an
-/// application may not see a consistent state if it uses a
-/// tolerance.  Consider an application that has two messages and
-/// wants to get the current message at time te:
-///
-///   - t0: message 0
-///   - te: "get current message"
-///   - t1: message 1
-///
-/// If te is close to t1, then t1 may be considered valid, which
-/// is probably not what you want.
-pub const CLOCK_SKEW_TOLERANCE: time::Duration
+
+lazy_static::lazy_static!{
+    /// The default amount of tolerance to use when comparing
+    /// some timestamps.
+    ///
+    /// Used by `Subpacket::signature_alive`.
+    ///
+    /// When determining whether a timestamp generated on another
+    /// machine is valid *now*, we need to account for clock skew.
+    /// (Note: you don't normally need to consider clock skew when
+    /// evaluating a signature's validity at some time in the past.)
+    ///
+    /// We tolerate half an hour of skew based on the following
+    /// anecdote: In 2019, a developer using Sequoia in a Windows VM
+    /// running inside of Virtual Box on Mac OS X reported that he
+    /// typically observed a few minutes of clock skew and
+    /// occasionally saw over 20 minutes of clock skew.
+    ///
+    /// Note: when new messages override older messages, and their
+    /// signatures are evaluated at some arbitrary point in time, an
+    /// application may not see a consistent state if it uses a
+    /// tolerance.  Consider an application that has two messages and
+    /// wants to get the current message at time te:
+    ///
+    ///   - t0: message 0
+    ///   - te: "get current message"
+    ///   - t1: message 1
+    ///
+    /// If te is close to t1, then t1 may be considered valid, which
+    /// is probably not what you want.
+    pub static ref CLOCK_SKEW_TOLERANCE: time::Duration
         = time::Duration::new(30 * 60, 0);
+
+}
 
 /// The subpacket types.
 ///
 /// The `SubpacketTag` enum holds a [`Subpacket`]'s identifier, the
 /// so-called tag.
+///
+///
+/// Note: This enum cannot be exhaustively matched to allow future
+/// extensions.
 #[non_exhaustive]
 #[derive(Debug)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -136,218 +145,194 @@ pub const CLOCK_SKEW_TOLERANCE: time::Duration
 pub enum SubpacketTag {
     /// The time the signature was made.
     ///
-    /// See [Section 5.2.3.11 of RFC 9580] for details.
+    /// See [Section 5.2.3.4 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.11 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///  [Section 5.2.3.4 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     SignatureCreationTime,
     /// The validity period of the signature.
     ///
     /// The validity is relative to the time stored in the signature's
     /// Signature Creation Time subpacket.
     ///
-    /// See [Section 5.2.3.18 of RFC 9580] for details.
+    /// See [Section 5.2.3.10 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.18 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
+    ///  [Section 5.2.3.10 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.10
     SignatureExpirationTime,
     /// Whether a signature should be published.
     ///
-    /// See [Section 5.2.3.19 of RFC 9580] for details.
+    /// See [Section 5.2.3.11 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.19 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.19
+    ///  [Section 5.2.3.11 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.11
     ExportableCertification,
     /// Signer asserts that the key is not only valid but also trustworthy at
     /// the specified level.
     ///
-    /// See [Section 5.2.3.21 of RFC 9580] for details.
+    /// See [Section 5.2.3.13 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.21 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
+    ///  [Section 5.2.3.13 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
     TrustSignature,
     /// Used in conjunction with Trust Signature packets (of level > 0) to
     /// limit the scope of trust that is extended.
     ///
-    /// See [Section 5.2.3.22 of RFC 9580] for details.
+    /// See [Section 5.2.3.14 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.22 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.22
+    ///  [Section 5.2.3.14 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.14
     RegularExpression,
     /// Whether a signature can later be revoked.
     ///
-    /// See [Section 5.2.3.20 of RFC 9580] for details.
+    /// See [Section 5.2.3.12 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.20 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.20
+    ///  [Section 5.2.3.12 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.12
     Revocable,
     /// The validity period of the key.
     ///
     /// The validity period is relative to the key's (not the signature's) creation time.
     ///
-    /// See [Section 5.2.3.13 of RFC 9580] for details.
+    /// See [Section 5.2.3.6 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.13 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    ///  [Section 5.2.3.6 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     KeyExpirationTime,
     /// Deprecated
     PlaceholderForBackwardCompatibility,
     /// The Symmetric algorithms that the certificate holder prefers.
     ///
-    /// See [Section 5.2.3.14 of RFC 9580] for details.
+    /// See [Section 5.2.3.7 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.14 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.14
+    ///  [Section 5.2.3.7 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.7
     PreferredSymmetricAlgorithms,
     /// Authorizes the specified key to issue revocation signatures for this
     /// certificate.
     ///
-    /// See [Section 5.2.3.23 of RFC 9580] for details.
+    /// See [Section 5.2.3.15 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.23 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+    ///  [Section 5.2.3.15 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
     RevocationKey,
     /// The OpenPGP Key ID of the key issuing the signature.
     ///
-    /// See [Section 5.2.3.12 of RFC 9580] for details.
+    /// See [Section 5.2.3.5 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.12 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///  [Section 5.2.3.5 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     Issuer,
     /// A "notation" on the signature.
     ///
-    /// See [Section 5.2.3.24 of RFC 9580] for details.
+    /// See [Section 5.2.3.16 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    ///  [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     NotationData,
     /// The Hash algorithms that the certificate holder prefers.
     ///
-    /// See [Section 5.2.3.16 of RFC 9580] for details.
+    /// See [Section 5.2.3.8 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.16 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.16
+    ///  [Section 5.2.3.8 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.8
     PreferredHashAlgorithms,
     /// The compression algorithms that the certificate holder prefers.
     ///
-    /// See [Section 5.2.3.17 of RFC 9580] for details.
+    /// See [Section 5.2.3.9 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.17 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.17
+    ///  [Section 5.2.3.9 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.9
     PreferredCompressionAlgorithms,
     /// A list of flags that indicate preferences that the certificate
     /// holder has about how the key is handled by a key server.
     ///
-    /// See [Section 5.2.3.25 of RFC 9580] for details.
+    /// See [Section 5.2.3.17 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.25 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.25
+    ///  [Section 5.2.3.17 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.17
     KeyServerPreferences,
     /// The URI of a key server where the certificate holder keeps
     /// their certificate up to date.
     ///
-    /// See [Section 5.2.3.26 of RFC 9580] for details.
+    /// See [Section 5.2.3.18 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.26 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.26
+    ///  [Section 5.2.3.18 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.18
     PreferredKeyServer,
     /// A flag in a User ID's self-signature that states whether this
     /// User ID is the primary User ID for this certificate.
     ///
-    /// See [Section 5.2.3.27 of RFC 9580] for details.
+    /// See [Section 5.2.3.19 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.27 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.27
+    ///  [Section 5.2.3.19 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.19
     PrimaryUserID,
     /// The URI of a document that describes the policy under which
     /// the signature was issued.
     ///
-    /// See [Section 5.2.3.28 of RFC 9580] for details.
+    /// See [Section 5.2.3.20 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.28 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.28
+    ///  [Section 5.2.3.20 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.20
     PolicyURI,
     /// A list of flags that hold information about a key.
     ///
-    /// See [Section 5.2.3.29 of RFC 9580] for details.
+    /// See [Section 5.2.3.21 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.29 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.29
+    ///  [Section 5.2.3.21 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.21
     KeyFlags,
     /// The User ID that is responsible for the signature.
     ///
-    /// See [Section 5.2.3.30 of RFC 9580] for details.
+    /// See [Section 5.2.3.22 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.30 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.30
+    ///  [Section 5.2.3.22 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.22
     SignersUserID,
     /// The reason for a revocation, used in key revocations and
     /// certification revocation signatures.
     ///
-    /// See [Section 5.2.3.31 of RFC 9580] for details.
+    /// See [Section 5.2.3.23 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.31 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.31
+    ///  [Section 5.2.3.23 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.23
     ReasonForRevocation,
     /// The OpenPGP features a user's implementation supports.
     ///
-    /// See [Section 5.2.3.32 of RFC 9580] for details.
+    /// See [Section 5.2.3.24 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.32 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.32
+    ///  [Section 5.2.3.24 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.24
     Features,
     /// A signature to which this signature refers.
     ///
-    /// See [Section 5.2.3.33 of RFC 9580] for details.
+    /// See [Section 5.2.3.25 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.33 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    ///  [Section 5.2.3.25 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     SignatureTarget,
     /// A complete Signature packet body.
     ///
     /// This is used to store a backsig in a subkey binding signature.
     ///
-    /// See [Section 5.2.3.34 of RFC 9580] for details.
+    /// See [Section 5.2.3.26 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.34 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
+    ///  [Section 5.2.3.26 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
     EmbeddedSignature,
-
-    /// The Fingerprint of the key that issued the signature.
+    /// The Fingerprint of the key that issued the signature (proposed).
     ///
-    /// See [Section 5.2.3.35 of RFC 9580] for details.
+    /// See [Section 5.2.3.28 of RFC 4880bis] for details.
     ///
-    ///  [Section 5.2.3.35 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///  [Section 5.2.3.28 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     IssuerFingerprint,
-
-    /// Reserved (was: AEAD algorithms that the certificate holder prefers).
-    #[deprecated(note = "Use PreferredAEADCiphersuites instead")]
+    /// The AEAD algorithms that the certificate holder prefers (proposed).
+    ///
+    /// See [Section 5.2.3.8 of RFC 4880bis] for details.
+    ///
+    ///  [Section 5.2.3.8 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.8
     PreferredAEADAlgorithms,
-
-    /// Who the signed message was intended for.
+    /// Who the signed message was intended for (proposed).
     ///
-    /// See [Section 5.2.3.36 of RFC 9580] for details.
+    /// See [Section 5.2.3.29 of RFC 4880bis] for details.
     ///
-    ///  [Section 5.2.3.36 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    ///  [Section 5.2.3.29 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.29
     IntendedRecipient,
-
-    /// The Approved Certifications subpacket (experimental).
+    /// The Attested Certifications subpacket (proposed).
     ///
     /// Allows the certificate holder to attest to third party
     /// certifications, allowing them to be distributed with the
     /// certificate.  This can be used to address certificate flooding
     /// concerns.
     ///
-    /// See [Section 2.2 of draft-dkg-openpgp-1pa3pc-02] for details.
+    /// See [Section 5.2.3.30 of RFC 4880bis] for details.
     ///
-    ///   [Section 2.2 of draft-dkg-openpgp-1pa3pc-02]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#approved-certifications-subpacket
-    ApprovedCertifications,
-
-    /// The AEAD Ciphersuites that the certificate holder prefers.
-    ///
-    /// A series of paired algorithm identifiers indicating how the
-    /// keyholder prefers to receive version 2 Symmetrically Encrypted
-    /// Integrity Protected Data.  Each pair of octets indicates a
-    /// combination of a symmetric cipher and an AEAD mode that the
-    /// key holder prefers to use.
-    ///
-    /// It is assumed that only the combinations of algorithms listed
-    /// are supported by the recipient's software, with the exception
-    /// of the mandatory-to-implement combination of AES-128 and OCB.
-    /// If AES-128 and OCB are not found in the subpacket, it is
-    /// implicitly listed at the end.
-    ///
-    /// See [Section 5.2.3.15 of RFC 9580] for details.
-    ///
-    ///  [Section 5.2.3.15 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#name-preferred-aead-ciphersuites
-    PreferredAEADCiphersuites,
-
+    ///  [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    AttestedCertifications,
     /// Reserved subpacket tag.
     Reserved(u8),
     /// Private subpacket tag.
     Private(u8),
     /// Unknown subpacket tag.
     Unknown(u8),
-
-    // If you add a new variant, make sure to add it to the
-    // conversions and to SUBPACKET_TAG_VARIANTS.
 }
 assert_send_and_sync!(SubpacketTag);
 
@@ -359,7 +344,6 @@ impl fmt::Display for SubpacketTag {
 
 impl From<u8> for SubpacketTag {
     fn from(u: u8) -> Self {
-        #[allow(deprecated)]
         match u {
             2 => SubpacketTag::SignatureCreationTime,
             3 => SubpacketTag::SignatureExpirationTime,
@@ -388,9 +372,8 @@ impl From<u8> for SubpacketTag {
             33 => SubpacketTag::IssuerFingerprint,
             34 => SubpacketTag::PreferredAEADAlgorithms,
             35 => SubpacketTag::IntendedRecipient,
-            37 => SubpacketTag::ApprovedCertifications,
-            39 => SubpacketTag::PreferredAEADCiphersuites,
-            0| 1| 8| 13| 14| 15| 17| 18| 19 | 38 => SubpacketTag::Reserved(u),
+            37 => SubpacketTag::AttestedCertifications,
+            0| 1| 8| 13| 14| 15| 17| 18| 19 => SubpacketTag::Reserved(u),
             100..=110 => SubpacketTag::Private(u),
             _ => SubpacketTag::Unknown(u),
         }
@@ -399,7 +382,6 @@ impl From<u8> for SubpacketTag {
 
 impl From<SubpacketTag> for u8 {
     fn from(t: SubpacketTag) -> Self {
-        #[allow(deprecated)]
         match t {
             SubpacketTag::SignatureCreationTime => 2,
             SubpacketTag::SignatureExpirationTime => 3,
@@ -428,57 +410,11 @@ impl From<SubpacketTag> for u8 {
             SubpacketTag::IssuerFingerprint => 33,
             SubpacketTag::PreferredAEADAlgorithms => 34,
             SubpacketTag::IntendedRecipient => 35,
-            SubpacketTag::ApprovedCertifications => 37,
-            SubpacketTag::PreferredAEADCiphersuites => 39,
+            SubpacketTag::AttestedCertifications => 37,
             SubpacketTag::Reserved(u) => u,
             SubpacketTag::Private(u) => u,
             SubpacketTag::Unknown(u) => u,
         }
-    }
-}
-
-#[allow(deprecated)]
-const SUBPACKET_TAG_VARIANTS: [SubpacketTag; 29] = [
-    SubpacketTag::SignatureCreationTime,
-    SubpacketTag::SignatureExpirationTime,
-    SubpacketTag::ExportableCertification,
-    SubpacketTag::TrustSignature,
-    SubpacketTag::RegularExpression,
-    SubpacketTag::Revocable,
-    SubpacketTag::KeyExpirationTime,
-    SubpacketTag::PlaceholderForBackwardCompatibility,
-    SubpacketTag::PreferredSymmetricAlgorithms,
-    SubpacketTag::RevocationKey,
-    SubpacketTag::Issuer,
-    SubpacketTag::NotationData,
-    SubpacketTag::PreferredHashAlgorithms,
-    SubpacketTag::PreferredCompressionAlgorithms,
-    SubpacketTag::KeyServerPreferences,
-    SubpacketTag::PreferredKeyServer,
-    SubpacketTag::PrimaryUserID,
-    SubpacketTag::PolicyURI,
-    SubpacketTag::KeyFlags,
-    SubpacketTag::SignersUserID,
-    SubpacketTag::ReasonForRevocation,
-    SubpacketTag::Features,
-    SubpacketTag::SignatureTarget,
-    SubpacketTag::EmbeddedSignature,
-    SubpacketTag::IssuerFingerprint,
-    SubpacketTag::PreferredAEADAlgorithms,
-    SubpacketTag::IntendedRecipient,
-    SubpacketTag::ApprovedCertifications,
-    SubpacketTag::PreferredAEADCiphersuites,
-];
-
-impl SubpacketTag {
-    /// Returns an iterator over all valid variants.
-    ///
-    /// Returns an iterator over all known variants.  This does not
-    /// include the [`SubpacketTag::Reserved`],
-    /// [`SubpacketTag::Private`], or [`SubpacketTag::Unknown`]
-    /// variants.
-    pub fn variants() -> impl Iterator<Item=Self> {
-        SUBPACKET_TAG_VARIANTS.iter().cloned()
     }
 }
 
@@ -505,42 +441,12 @@ mod tests {
                 SubpacketTag::Reserved(u) =>
                     (u == 0 || u == 1 || u == 8
                      || u == 13 || u == 14 || u == 15
-                     || u == 17 || u == 18 || u == 19
-                     || u == 38),
+                     || u == 17 || u == 18 || u == 19),
                 SubpacketTag::Private(u) => (100..=110).contains(&u),
                 SubpacketTag::Unknown(u) => (u > 33 && u < 100) || u > 110,
                 _ => true
             }
         }
-    }
-
-    #[test]
-    fn subpacket_tag_variants() {
-        use std::collections::HashSet;
-        use std::iter::FromIterator;
-
-        // SUBPACKET_TAG_VARIANTS is a list.  Derive it in a different way
-        // to double-check that nothing is missing.
-        let derived_variants = (0..=u8::MAX)
-            .map(SubpacketTag::from)
-            .filter(|t| {
-                match t {
-                    SubpacketTag::Reserved(_) => false,
-                    SubpacketTag::Private(_) => false,
-                    SubpacketTag::Unknown(_) => false,
-                    _ => true,
-                }
-            })
-            .collect::<HashSet<_>>();
-
-        let known_variants
-            = HashSet::from_iter(SUBPACKET_TAG_VARIANTS.iter().cloned());
-
-        let missing = known_variants
-            .symmetric_difference(&derived_variants)
-            .collect::<Vec<_>>();
-
-        assert!(missing.is_empty(), "{:?}", missing);
     }
 }
 
@@ -556,8 +462,8 @@ mod tests {
 /// routes lookups appropriately.  As such, it is usually better to
 /// work with subpackets using that interface.
 ///
-/// [signature subpackets]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.7
-/// [`Issuer`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+/// [signature subpackets]: https://tools.ietf.org/html/rfc4880#section-5.2.3.1
+/// [`Issuer`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
 ///
 /// # Examples
 ///
@@ -592,35 +498,21 @@ mod tests {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone)]
 pub struct SubpacketArea {
     /// The subpackets.
     packets: Vec<Subpacket>,
 
-    // The subpacket area, but parsed so that the vector is indexed by
-    // the subpacket tag, and the value is the index of the *last*
+    // The subpacket area, but parsed so that the map is indexed by
+    // the subpacket tag, and the value corresponds to the *last*
     // occurrence of that subpacket in the subpacket area.
     //
     // Since self-referential structs are a no-no, we use an index
     // to reference the content in the area.
     //
-    // Note: A subpacket area is at most 2**16-1 bytes large.  A
-    // subpacket is at least two bytes long (one for the length, and
-    // one for the subpacket type).  Thus, a subpacket area can't have
-    // more than 2**15 subpackets. This means that we need at most 15
-    // bits.  Thus, instead of using an `Option<u16>`, which requires
-    // 32 bits, we use an unused value to mean not present.
-    parsed: std::sync::OnceLock<Vec<u16>>,
+    // This is an option, because we parse the subpacket area lazily.
+    parsed: Mutex<RefCell<Option<HashMap<SubpacketTag, usize>>>>,
 }
 assert_send_and_sync!(SubpacketArea);
-
-// The value for an entry of `SubpacketArea::parsed` when the
-// subpacket is not present.
-//
-// We don't use an `Option<u16>`, as that would require 32 bits, and
-// this value is not used.  See the comment for
-// `SubpacketArea::parsed`.
-const SUBPACKET_NOT_PRESENT: u16 = u16::MAX;
 
 #[cfg(test)]
 impl ArbitraryBounded for SubpacketArea {
@@ -642,6 +534,12 @@ impl_arbitrary_with_bound!(SubpacketArea);
 impl Default for SubpacketArea {
     fn default() -> Self {
         Self::new(Default::default()).unwrap()
+    }
+}
+
+impl Clone for SubpacketArea {
+    fn clone(&self) -> Self {
+        Self::new(self.packets.clone()).unwrap()
     }
 }
 
@@ -698,41 +596,33 @@ impl SubpacketArea {
     pub fn new(packets: Vec<Subpacket>) -> Result<SubpacketArea> {
         let area = SubpacketArea {
             packets,
-            parsed: std::sync::OnceLock::new(),
+            parsed: Mutex::new(RefCell::new(None)),
         };
-        Ok(area)
+        if area.serialized_len() > std::u16::MAX as usize {
+            Err(Error::InvalidArgument(
+                format!("Subpacket area exceeds maximum size: {}",
+                        area.serialized_len())).into())
+        } else {
+            Ok(area)
+        }
     }
 
-    /// Initialize the cache mapping subpacket tags to positions in
-    /// the subpacket area.
-    ///
-    /// If the cache is already initialized, this is a NOP.
-    ///
-    /// Returns the locked cache.
-    fn cache_init(&self) -> &Vec<u16>
-    {
-        self.parsed.get_or_init(|| {
-            // The largest defined subpacket in the crypto refresh is
-            // 39.
-            if let Some(max)
-                = self.packets.iter().map(|sp| u8::from(sp.tag())).max()
-            {
-                let max = max as usize;
-
-                let mut index = vec![ SUBPACKET_NOT_PRESENT; max + 1 ];
-                for (i, sp) in self.packets.iter().enumerate() {
-                    index[u8::from(sp.tag()) as usize] = i as u16;
-                }
-                index
-            } else {
-                Vec::new()
+    // Initialize `Signature::hashed_area_parsed` from
+    // `Signature::hashed_area`, if necessary.
+    fn cache_init(&self) {
+        if self.parsed.lock().unwrap().borrow().is_none() {
+            let mut hash = HashMap::new();
+            for (i, sp) in self.packets.iter().enumerate() {
+                hash.insert(sp.tag(), i);
             }
-        })
+
+            *self.parsed.lock().unwrap().borrow_mut() = Some(hash);
+        }
     }
 
     /// Invalidates the cache.
-    fn cache_invalidate(&mut self) {
-        self.parsed = std::sync::OnceLock::new();
+    fn cache_invalidate(&self) {
+        *self.parsed.lock().unwrap().borrow_mut() = None;
     }
 
     /// Iterates over the subpackets.
@@ -788,16 +678,16 @@ impl SubpacketArea {
     /// A given subpacket may occur multiple times.  For some, like
     /// the [`Notation Data`] subpacket, this is reasonable.  For
     /// others, like the [`Signature Creation Time`] subpacket, this
-    /// results in an ambiguity.  [Section 5.2.3.9 of RFC 9580] says:
+    /// results in an ambiguity.  [Section 5.2.4.1 of RFC 4880] says:
     ///
     /// > a signature may contain multiple copies of a preference or
     /// > multiple expiration times.  In most cases, an implementation
     /// > SHOULD use the last subpacket in the signature, but MAY use
     /// > any conflict resolution scheme that makes more sense.
     ///
-    ///   [`Notation Data`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
-    ///   [Section 5.2.3.9 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.9
+    ///   [`Notation Data`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
+    ///   [Section 5.2.4.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.4.1
     ///
     /// This function implements the recommended strategy of returning
     /// the last subpacket.
@@ -834,10 +724,11 @@ impl SubpacketArea {
     /// # }
     /// ```
     pub fn subpacket(&self, tag: SubpacketTag) -> Option<&Subpacket> {
-        match self.cache_init().get(u8::from(tag) as usize) {
-            Some(&SUBPACKET_NOT_PRESENT) => None,
-            Some(&n) => Some(&self.packets[n as usize]),
-            _ => None,
+        self.cache_init();
+
+        match self.parsed.lock().unwrap().borrow().as_ref().unwrap().get(&tag) {
+            Some(&n) => Some(&self.packets[n]),
+            None => None,
         }
     }
 
@@ -847,16 +738,16 @@ impl SubpacketArea {
     /// A given subpacket may occur multiple times.  For some, like
     /// the [`Notation Data`] subpacket, this is reasonable.  For
     /// others, like the [`Signature Creation Time`] subpacket, this
-    /// results in an ambiguity.  [Section 5.2.3.9 of RFC 9580] says:
+    /// results in an ambiguity.  [Section 5.2.4.1 of RFC 4880] says:
     ///
     /// > a signature may contain multiple copies of a preference or
     /// > multiple expiration times.  In most cases, an implementation
     /// > SHOULD use the last subpacket in the signature, but MAY use
     /// > any conflict resolution scheme that makes more sense.
     ///
-    ///   [`Notation Data`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
-    ///   [`Signature Creation Time`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
-    ///   [Section 5.2.3.9 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.9
+    ///   [`Notation Data`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
+    ///   [`Signature Creation Time`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
+    ///   [Section 5.2.4.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.4.1
     ///
     /// This function implements the recommended strategy of returning
     /// the last subpacket.
@@ -894,10 +785,11 @@ impl SubpacketArea {
     /// ```
     pub fn subpacket_mut(&mut self, tag: SubpacketTag)
                          -> Option<&mut Subpacket> {
-        match self.cache_init().get(u8::from(tag) as usize) {
-            Some(&SUBPACKET_NOT_PRESENT) => None,
-            Some(&n) => Some(&mut self.packets[n as usize]),
-            _ => None,
+        self.cache_init();
+
+        match self.parsed.lock().unwrap().borrow().as_ref().unwrap().get(&tag) {
+            Some(&n) => Some(&mut self.packets[n]),
+            None => None,
         }
     }
 
@@ -911,7 +803,7 @@ impl SubpacketArea {
     /// reasonable.
     ///
     /// [`SubpacketArea::subpacket`]: Self::subpacket()
-    /// [`Notation Data`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [`Notation Data`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     ///
     /// # Examples
     ///
@@ -1024,15 +916,7 @@ impl SubpacketArea {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn add(&mut self, packet: Subpacket) -> Result<()> {
-        self.add_internal(packet, false)
-    }
-
-    /// Adds `packet`, setting its authenticated flag to `authenticated`.
-    pub(super) fn add_internal(&mut self, packet: Subpacket,
-                               authenticated: bool)
-                               -> Result<()>
-    {
+    pub fn add(&mut self, mut packet: Subpacket) -> Result<()> {
         if self.serialized_len() + packet.serialized_len()
             > ::std::u16::MAX as usize
         {
@@ -1041,7 +925,7 @@ impl SubpacketArea {
         }
 
         self.cache_invalidate();
-        packet.set_authenticated(authenticated);
+        packet.set_authenticated(false);
         self.packets.push(packet);
         Ok(())
     }
@@ -1065,7 +949,7 @@ impl SubpacketArea {
     ///
     /// Assuming we have a signature with an additional `Issuer`
     /// subpacket in the unhashed area (see the example for
-    /// [`SubpacketArea::add`]), this replaces the `Issuer` subpacket
+    /// [`SubpacketArea::add`], this replaces the `Issuer` subpacket
     /// in the unhashed area.  Because the unhashed area is not
     /// protected by the signature, the signature remains valid:
     ///
@@ -1123,7 +1007,7 @@ impl SubpacketArea {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn replace(&mut self, packet: Subpacket) -> Result<()> {
+    pub fn replace(&mut self, mut packet: Subpacket) -> Result<()> {
         if self.iter().filter_map(|sp| if sp.tag() != packet.tag() {
             Some(sp.serialized_len())
         } else {
@@ -1163,7 +1047,7 @@ impl SubpacketArea {
     /// The [`SignatureBuilder`] sorts the subpacket areas just before
     /// creating the signature.
     ///
-    /// [`Notation Data`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [`Notation Data`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     /// [`SignatureBuilder`]: super::SignatureBuilder
     pub fn sort(&mut self) {
         self.cache_invalidate();
@@ -1183,7 +1067,7 @@ impl SubpacketArea {
 /// critical notations), even if they don't understand the notations
 /// themselves.
 ///
-///   [`Notation Data`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+///   [`Notation Data`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
 ///
 /// It is possible to control how Sequoia's higher-level functionality
 /// handles unknown, critical notations using a [`Policy`] object.
@@ -1200,9 +1084,9 @@ impl SubpacketArea {
 /// the user namespace have the form `name@example.org` and are
 /// managed by the owner of the domain.  Names in the IETF namespace
 /// may not contain an `@` and are managed by IANA.  See [Section
-/// 5.2.3.24 of RFC 9580] for details.
+/// 5.2.3.16 of RFC 4880] for details.
 ///
-///   [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+///   [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NotationData {
     flags: NotationDataFlags,
@@ -1323,7 +1207,7 @@ impl fmt::Debug for NotationDataFlags {
             need_comma = true;
         }
 
-        for i in self.0.iter_set() {
+        for i in self.0.iter() {
             match i {
                 NOTATION_DATA_FLAG_HUMAN_READABLE => (),
                 i => {
@@ -1360,10 +1244,9 @@ impl NotationDataFlags {
         Self::new(&[0, 0, 0, 0]).unwrap()
     }
 
-    /// Returns a reference to the underlying
-    /// [`Bitfield`](crate::types::Bitfield).
-    pub fn as_bitfield(&self) -> &crate::types::Bitfield {
-        &self.0
+    /// Returns a slice containing the raw values.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
     }
 
     /// Returns whether the specified notation data flag is set.
@@ -1410,10 +1293,10 @@ impl NotationDataFlags {
     /// # Ok(()) }
     /// ```
     pub fn set(mut self, bit: usize) -> Result<Self> {
-        assert_eq!(self.0.as_bytes().len(), 4);
+        assert_eq!(self.0.raw.len(), 4);
         let byte = bit / 8;
         if byte < 4 {
-            self.0.set(bit);
+            self.0.raw[byte] |= 1 << (bit % 8);
             Ok(self)
         } else {
             Err(Error::InvalidArgument(
@@ -1440,10 +1323,10 @@ impl NotationDataFlags {
     /// # Ok(()) }
     /// ```
     pub fn clear(mut self, bit: usize) -> Result<Self> {
-        assert_eq!(self.0.as_bytes().len(), 4);
+        assert_eq!(self.0.raw.len(), 4);
         let byte = bit / 8;
         if byte < 4 {
-            self.0.clear(bit);
+            self.0.raw[byte] &= !(1 << (bit % 8));
             Ok(self)
         } else {
             Err(Error::InvalidArgument(
@@ -1470,13 +1353,16 @@ impl NotationDataFlags {
 /// Holds an arbitrary, well-structured subpacket.
 ///
 /// The `SubpacketValue` enum holds a [`Subpacket`]'s value.  The
-/// values are well-structured in the sense that they have been parsed
+/// values are well structured in the sense that they have been parsed
 /// into Sequoia's native data types rather than just holding the raw
 /// byte vector.  For instance, the [`Issuer`] variant holds a
 /// [`KeyID`].
 ///
 /// [`Issuer`]: SubpacketValue::Issuer
 /// [`KeyID`]: super::super::super::KeyID
+///
+/// Note: This enum cannot be exhaustively matched to allow future
+/// extensions.
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum SubpacketValue {
@@ -1490,31 +1376,31 @@ pub enum SubpacketValue {
 
     /// The time the signature was made.
     ///
-    /// See [Section 5.2.3.11 of RFC 9580] for details.
+    /// See [Section 5.2.3.4 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.11 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///  [Section 5.2.3.4 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     SignatureCreationTime(Timestamp),
     /// The validity period of the signature.
     ///
     /// The validity is relative to the time stored in the signature's
     /// Signature Creation Time subpacket.
     ///
-    /// See [Section 5.2.3.18 of RFC 9580] for details.
+    /// See [Section 5.2.3.10 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.18 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
+    ///  [Section 5.2.3.10 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.10
     SignatureExpirationTime(Duration),
     /// Whether a signature should be published.
     ///
-    /// See [Section 5.2.3.19 of RFC 9580] for details.
+    /// See [Section 5.2.3.11 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.19 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.19
+    ///  [Section 5.2.3.11 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.11
     ExportableCertification(bool),
     /// Signer asserts that the key is not only valid but also trustworthy at
     /// the specified level.
     ///
-    /// See [Section 5.2.3.21 of RFC 9580] for details.
+    /// See [Section 5.2.3.13 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.21 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
+    ///  [Section 5.2.3.13 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
     TrustSignature {
         /// Trust level, or depth.
         ///
@@ -1538,9 +1424,9 @@ pub enum SubpacketValue {
     /// Used in conjunction with Trust Signature packets (of level > 0) to
     /// limit the scope of trust that is extended.
     ///
-    /// See [Section 5.2.3.22 of RFC 9580] for details.
+    /// See [Section 5.2.3.14 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.22 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.22
+    ///  [Section 5.2.3.14 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.14
     ///
     /// Note: The RFC requires that the serialized form includes a
     /// trailing NUL byte.  When Sequoia parses the regular expression
@@ -1550,101 +1436,101 @@ pub enum SubpacketValue {
     RegularExpression(Vec<u8>),
     /// Whether a signature can later be revoked.
     ///
-    /// See [Section 5.2.3.20 of RFC 9580] for details.
+    /// See [Section 5.2.3.12 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.20 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.20
+    ///  [Section 5.2.3.12 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.12
     Revocable(bool),
     /// The validity period of the key.
     ///
     /// The validity period is relative to the key's (not the signature's) creation time.
     ///
-    /// See [Section 5.2.3.13 of RFC 9580] for details.
+    /// See [Section 5.2.3.6 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.13 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    ///  [Section 5.2.3.6 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     KeyExpirationTime(Duration),
     /// The Symmetric algorithms that the certificate holder prefers.
     ///
-    /// See [Section 5.2.3.14 of RFC 9580] for details.
+    /// See [Section 5.2.3.7 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.14 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.14
+    ///  [Section 5.2.3.7 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.7
     PreferredSymmetricAlgorithms(Vec<SymmetricAlgorithm>),
     /// Authorizes the specified key to issue revocation signatures for this
     /// certificate.
     ///
-    /// See [Section 5.2.3.23 of RFC 9580] for details.
+    /// See [Section 5.2.3.15 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.23 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+    ///  [Section 5.2.3.15 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
     RevocationKey(RevocationKey),
     /// The OpenPGP Key ID of the key issuing the signature.
     ///
-    /// See [Section 5.2.3.12 of RFC 9580] for details.
+    /// See [Section 5.2.3.5 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.12 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///  [Section 5.2.3.5 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     Issuer(KeyID),
     /// A "notation" on the signature.
     ///
-    /// See [Section 5.2.3.24 of RFC 9580] for details.
+    /// See [Section 5.2.3.16 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    ///  [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     NotationData(NotationData),
     /// The Hash algorithms that the certificate holder prefers.
     ///
-    /// See [Section 5.2.3.16 of RFC 9580] for details.
+    /// See [Section 5.2.3.8 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.16 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.16
+    ///  [Section 5.2.3.8 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.8
     PreferredHashAlgorithms(Vec<HashAlgorithm>),
     /// The compression algorithms that the certificate holder prefers.
     ///
-    /// See [Section 5.2.3.17 of RFC 9580] for details.
+    /// See [Section 5.2.3.9 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.17 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.17
+    ///  [Section 5.2.3.9 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.9
     PreferredCompressionAlgorithms(Vec<CompressionAlgorithm>),
     /// A list of flags that indicate preferences that the certificate
     /// holder has about how the key is handled by a key server.
     ///
-    /// See [Section 5.2.3.25 of RFC 9580] for details.
+    /// See [Section 5.2.3.17 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.25 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.25
+    ///  [Section 5.2.3.17 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.17
     KeyServerPreferences(KeyServerPreferences),
     /// The URI of a key server where the certificate holder keeps
     /// their certificate up to date.
     ///
-    /// See [Section 5.2.3.26 of RFC 9580] for details.
+    /// See [Section 5.2.3.18 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.26 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.26
+    ///  [Section 5.2.3.18 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.18
     PreferredKeyServer(Vec<u8>),
     /// A flag in a User ID's self-signature that states whether this
     /// User ID is the primary User ID for this certificate.
     ///
-    /// See [Section 5.2.3.27 of RFC 9580] for details.
+    /// See [Section 5.2.3.19 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.27 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.27
+    ///  [Section 5.2.3.19 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.19
     PrimaryUserID(bool),
     /// The URI of a document that describes the policy under which
     /// the signature was issued.
     ///
-    /// See [Section 5.2.3.28 of RFC 9580] for details.
+    /// See [Section 5.2.3.20 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.28 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.28
+    ///  [Section 5.2.3.20 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.20
     PolicyURI(Vec<u8>),
     /// A list of flags that hold information about a key.
     ///
-    /// See [Section 5.2.3.29 of RFC 9580] for details.
+    /// See [Section 5.2.3.21 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.29 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.29
+    ///  [Section 5.2.3.21 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.21
     KeyFlags(KeyFlags),
     /// The User ID that is responsible for the signature.
     ///
-    /// See [Section 5.2.3.30 of RFC 9580] for details.
+    /// See [Section 5.2.3.22 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.30 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.30
+    ///  [Section 5.2.3.22 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.22
     SignersUserID(Vec<u8>),
     /// The reason for a revocation, used in key revocations and
     /// certification revocation signatures.
     ///
-    /// See [Section 5.2.3.31 of RFC 9580] for details.
+    /// See [Section 5.2.3.23 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.31 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.31
+    ///  [Section 5.2.3.23 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.23
     ReasonForRevocation {
         /// Machine-readable reason for revocation.
         code: ReasonForRevocation,
@@ -1654,15 +1540,15 @@ pub enum SubpacketValue {
     },
     /// The OpenPGP features a user's implementation supports.
     ///
-    /// See [Section 5.2.3.32 of RFC 9580] for details.
+    /// See [Section 5.2.3.24 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.32 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.32
+    ///  [Section 5.2.3.24 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.24
     Features(Features),
     /// A signature to which this signature refers.
     ///
-    /// See [Section 5.2.3.33 of RFC 9580] for details.
+    /// See [Section 5.2.3.25 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.33 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    ///  [Section 5.2.3.25 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     SignatureTarget {
         /// Public-key algorithm of the target signature.
         pk_algo: PublicKeyAlgorithm,
@@ -1675,56 +1561,39 @@ pub enum SubpacketValue {
     ///
     /// This is used to store a backsig in a subkey binding signature.
     ///
-    /// See [Section 5.2.3.34 of RFC 9580] for details.
+    /// See [Section 5.2.3.26 of RFC 4880] for details.
     ///
-    ///  [Section 5.2.3.34 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
+    ///  [Section 5.2.3.26 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
     EmbeddedSignature(Signature),
-
-    /// The Fingerprint of the key that issued the signature.
+    /// The Fingerprint of the key that issued the signature (proposed).
     ///
-    /// See [Section 5.2.3.35 of RFC 9580]
-    /// for details.
+    /// See [Section 5.2.3.28 of RFC 4880bis] for details.
     ///
-    ///  [Section 5.2.3.35 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///  [Section 5.2.3.28 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     IssuerFingerprint(Fingerprint),
-
-    /// Who the signed message was intended for.
+    /// The AEAD algorithms that the certificate holder prefers (proposed).
     ///
-    /// See [Section 5.2.3.36 of RFC 9580] for details.
+    /// See [Section 5.2.3.8 of RFC 4880bis] for details.
     ///
-    ///  [Section 5.2.3.36 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    ///  [Section 5.2.3.8 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.8
+    PreferredAEADAlgorithms(Vec<AEADAlgorithm>),
+    /// Who the signed message was intended for (proposed).
+    ///
+    /// See [Section 5.2.3.29 of RFC 4880bis] for details.
+    ///
+    ///  [Section 5.2.3.29 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.29
     IntendedRecipient(Fingerprint),
-
-    /// The Approved Certifications subpacket (experimental).
+    /// The Attested Certifications subpacket (proposed).
     ///
     /// Allows the certificate holder to attest to third party
     /// certifications, allowing them to be distributed with the
     /// certificate.  This can be used to address certificate flooding
     /// concerns.
     ///
-    /// See [Section 2.2 of draft-dkg-openpgp-1pa3pc-02] for details.
+    /// See [Section 5.2.3.30 of RFC 4880bis] for details.
     ///
-    ///   [Section 2.2 of draft-dkg-openpgp-1pa3pc-02]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#approved-certifications-subpacket
-    ApprovedCertifications(Vec<Box<[u8]>>),
-
-    /// The AEAD Ciphersuites that the certificate holder prefers.
-    ///
-    /// A series of paired algorithm identifiers indicating how the
-    /// keyholder prefers to receive version 2 Symmetrically Encrypted
-    /// Integrity Protected Data.  Each pair of octets indicates a
-    /// combination of a symmetric cipher and an AEAD mode that the
-    /// key holder prefers to use.
-    ///
-    /// It is assumed that only the combinations of algorithms listed
-    /// are supported by the recipient's software, with the exception
-    /// of the mandatory-to-implement combination of AES-128 and OCB.
-    /// If AES-128 and OCB are not found in the subpacket, it is
-    /// implicitly listed at the end.
-    ///
-    /// See [Section 5.2.3.15 of RFC 9580] for details.
-    ///
-    ///  [Section 5.2.3.15 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#name-preferred-aead-ciphersuites
-    PreferredAEADCiphersuites(Vec<(SymmetricAlgorithm, AEADAlgorithm)>),
+    ///  [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    AttestedCertifications(Vec<Box<[u8]>>),
 }
 assert_send_and_sync!(SubpacketValue);
 
@@ -1734,10 +1603,8 @@ impl ArbitraryBounded for SubpacketValue {
         use self::SubpacketValue::*;
         use crate::arbitrary_helper::gen_arbitrary_from_range;
 
-        #[allow(deprecated)]
         loop {
-            #[allow(deprecated)]
-            break match gen_arbitrary_from_range(0..27, g) {
+            break match gen_arbitrary_from_range(0..26, g) {
                 0 => SignatureCreationTime(Arbitrary::arbitrary(g)),
                 1 => SignatureExpirationTime(Arbitrary::arbitrary(g)),
                 2 => ExportableCertification(Arbitrary::arbitrary(g)),
@@ -1774,12 +1641,8 @@ impl ArbitraryBounded for SubpacketValue {
                 22 => EmbeddedSignature(
                     ArbitraryBounded::arbitrary_bounded(g, depth - 1)),
                 23 => IssuerFingerprint(Arbitrary::arbitrary(g)),
-                24 => Unknown {
-                    tag: SubpacketTag::PreferredAEADAlgorithms,
-                    body: Arbitrary::arbitrary(g),
-                },
+                24 => PreferredAEADAlgorithms(Arbitrary::arbitrary(g)),
                 25 => IntendedRecipient(Arbitrary::arbitrary(g)),
-                26 => PreferredAEADCiphersuites(Arbitrary::arbitrary(g)),
                 _ => unreachable!(),
             }
         }
@@ -1793,7 +1656,6 @@ impl SubpacketValue {
     /// Returns the subpacket tag for this value.
     pub fn tag(&self) -> SubpacketTag {
         use self::SubpacketValue::*;
-        #[allow(deprecated)]
         match &self {
             SignatureCreationTime(_) => SubpacketTag::SignatureCreationTime,
             SignatureExpirationTime(_) =>
@@ -1824,10 +1686,10 @@ impl SubpacketValue {
             SignatureTarget { .. } => SubpacketTag::SignatureTarget,
             EmbeddedSignature(_) => SubpacketTag::EmbeddedSignature,
             IssuerFingerprint(_) => SubpacketTag::IssuerFingerprint,
+            PreferredAEADAlgorithms(_) =>
+                SubpacketTag::PreferredAEADAlgorithms,
             IntendedRecipient(_) => SubpacketTag::IntendedRecipient,
-            ApprovedCertifications(_) => SubpacketTag::ApprovedCertifications,
-            PreferredAEADCiphersuites(_) =>
-                SubpacketTag::PreferredAEADCiphersuites,
+            AttestedCertifications(_) => SubpacketTag::AttestedCertifications,
             Unknown { tag, .. } => *tag,
         }
     }
@@ -1868,11 +1730,12 @@ impl SubpacketValue {
 /// the [`Notation Data`] subpacket ([`NotationData`]), is explicitly
 /// designed for adding arbitrary data to signatures.
 ///
-///   [`Notation Data`]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+///   [`Notation Data`]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
 ///
-/// Subpackets are described in [Section 5.2.3.7 of RFC 9580].
+/// Subpackets are described in [Section 5.2.3.1 of RFC 4880].
 ///
-///   [Section 5.2.3.7 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.7
+///   [Section 5.2.3.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.1
+#[derive(Clone)]
 pub struct Subpacket {
     /// The length.
     ///
@@ -1886,22 +1749,11 @@ pub struct Subpacket {
     critical: bool,
     /// Packet value, must match packet type.
     value: SubpacketValue,
-    /// Whether the information in this subpacket are
+    /// Whether or not the information in this subpacket are
     /// authenticated in the context of its signature.
-    authenticated: atomic::AtomicBool,
+    authenticated: bool,
 }
 assert_send_and_sync!(Subpacket);
-
-impl Clone for Subpacket {
-    fn clone(&self) -> Self {
-        Subpacket {
-            length: self.length.clone(),
-            critical: self.critical,
-            value: self.value.clone(),
-            authenticated: self.authenticated().into(),
-        }
-    }
-}
 
 impl PartialEq for Subpacket {
     fn eq(&self, other: &Subpacket) -> bool {
@@ -1992,7 +1844,7 @@ impl fmt::Debug for Subpacket {
             s.field("critical", &self.critical);
         }
         s.field("value", &self.value);
-        s.field("authenticated", &self.authenticated());
+        s.field("authenticated", &self.authenticated);
         s.finish()
     }
 }
@@ -2015,7 +1867,7 @@ impl Subpacket {
             length,
             critical,
             value,
-            authenticated: false.into(),
+            authenticated: false,
         }
     }
 
@@ -2034,6 +1886,11 @@ impl Subpacket {
         &self.value
     }
 
+    /// Returns the Subpacket's value.
+    pub(crate) fn value_mut(&mut self) -> &mut SubpacketValue {
+        &mut self.value
+    }
+
     /// Returns whether the information in this subpacket has been
     /// authenticated.
     ///
@@ -2043,17 +1900,19 @@ impl Subpacket {
     ///     been verified.
     ///   - It is in the unhashed subpacket area and the information
     ///     is self-authenticating and has been authenticated by
-    ///     Sequoia.  This can be done for issuer information and
+    ///     Sequoia.  This is can be done for issuer information and
     ///     embedded Signatures.
     ///   - The subpacket has been authenticated by the user and
     ///     marked as such using [`Subpacket::set_authenticated`].
     ///
     /// Note: The authentication is only valid in the context of the
-    /// signature the subpacket is in.  If the authenticated
-    /// `Subpacket` is added to a [`SubpacketArea`], the flag is
+    /// signature the subpacket is in.  If the `Subpacket` is cloned,
+    /// or a `Subpacket` is added to a [`SubpacketArea`], the flag is
     /// cleared.
+    ///
+    ///   [`Subpacket::set_authenticated`]: Self::set_authenticated()
     pub fn authenticated(&self) -> bool {
-        self.authenticated.load(atomic::Ordering::Relaxed)
+        self.authenticated
     }
 
     /// Marks the information in this subpacket as authenticated or
@@ -2062,8 +1921,8 @@ impl Subpacket {
     /// See [`Subpacket::authenticated`] for more information.
     ///
     ///   [`Subpacket::authenticated`]: Self::authenticated()
-    pub fn set_authenticated(&self, authenticated: bool) -> bool {
-        self.authenticated.swap(authenticated, atomic::Ordering::Relaxed)
+    pub fn set_authenticated(&mut self, authenticated: bool) -> bool {
+        std::mem::replace(&mut self.authenticated, authenticated)
     }
 }
 
@@ -2284,6 +2143,7 @@ impl SubpacketAreas {
     ///
     /// For subpackets that can safely occur in both subpacket areas,
     /// this function prefers instances in the hashed subpacket area.
+    #[allow(clippy::redundant_pattern_matching)]
     pub fn subpacket_mut(&mut self, tag: SubpacketTag)
                          -> Option<&mut Subpacket> {
         if let Some(_) = self.hashed_area().subpacket(tag) {
@@ -2368,7 +2228,7 @@ impl SubpacketAreas {
     /// the signature's hashed area.  This doesn't mean that the time
     /// stamp is correct: the issuer can always forge it.
     ///
-    /// [Signature Creation Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Signature Creation Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///
     /// If the subpacket is not present in the hashed subpacket area,
     /// this returns `None`.
@@ -2399,7 +2259,7 @@ impl SubpacketAreas {
     /// signature's creation time, which is stored in the signature's
     /// [Signature Creation Time subpacket].
     ///
-    /// [Signature Creation Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Signature Creation Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///
     /// A [Signature Expiration Time subpacket] specifies when the
     /// signature expires.  This is different from the [Key Expiration
@@ -2413,11 +2273,11 @@ impl SubpacketAreas {
     /// key to be valid if there is another valid binding signature,
     /// even if it is older than the expired signature; if the active
     /// binding signature indicates that the key has expired, then
-    /// OpenPGP implementations will not fall back to an older binding
+    /// OpenPGP implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.10
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     /// [`SubpacketAreas::key_validity_period`]: SubpacketAreas::key_validity_period()
     ///
     /// There are several cases where having a signature expire is
@@ -2471,7 +2331,7 @@ impl SubpacketAreas {
     /// [`SubpacketAreas::signature_validity_period`] method returns
     /// the subpacket's raw value.
     ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.10
     /// [`SubpacketAreas::signature_validity_period`]: SubpacketAreas::signature_validity_period()
     ///
     /// The Signature Expiration Time subpacket is different from the
@@ -2485,10 +2345,10 @@ impl SubpacketAreas {
     /// valid if there is another valid binding signature, even if it
     /// is older than the expired signature; if the active binding
     /// signature indicates that the key has expired, then OpenPGP
-    /// implementations will not fall back to an older binding
+    /// implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     /// [`SubpacketAreas::key_validity_period`]: SubpacketAreas::key_validity_period()
     ///
     /// There are several cases where having a signature expire is
@@ -2517,8 +2377,6 @@ impl SubpacketAreas {
     /// Note: if the signature contains multiple instances of this
     /// subpacket in the hashed subpacket area, the last one is
     /// returned.
-    // Note: If you update this function, also update
-    // SignatureBuilder::signature_expiration_time.
     pub fn signature_expiration_time(&self) -> Option<time::SystemTime> {
         match (self.signature_creation_time(), self.signature_validity_period())
         {
@@ -2527,7 +2385,7 @@ impl SubpacketAreas {
         }
     }
 
-    /// Returns whether the signature is alive at the specified
+    /// Returns whether or not the signature is alive at the specified
     /// time.
     ///
     /// A signature is considered to be alive if `creation time -
@@ -2539,7 +2397,7 @@ impl SubpacketAreas {
     /// for `time`.
     ///
     /// If `time` is `None`, and `clock_skew_tolerance` is `None`,
-    /// then this function uses [`CLOCK_SKEW_TOLERANCE`] for the
+    /// then this function uses [`struct@CLOCK_SKEW_TOLERANCE`] for the
     /// tolerance.  If `time` is not `None `and `clock_skew_tolerance`
     /// is `None`, it uses no tolerance.  The intuition here is that
     /// we only need a tolerance when checking if a signature is alive
@@ -2579,12 +2437,12 @@ impl SubpacketAreas {
     ///
     /// # Errors
     ///
-    /// [Section 5.2.3.11 of RFC 9580] states that a Signature Creation
+    /// [Section 5.2.3.4 of RFC 4880] states that a Signature Creation
     /// Time subpacket "MUST be present in the hashed area."
     /// Consequently, if such a packet does not exist, this function
     /// returns [`Error::MalformedPacket`].
     ///
-    ///  [Section 5.2.3.11 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    ///  [Section 5.2.3.4 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///  [`Error::MalformedPacket`]: super::super::super::Error::MalformedPacket
     ///
     /// # Examples
@@ -2609,7 +2467,7 @@ impl SubpacketAreas {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// let (alice, _) =
-    ///     CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     ///
     /// // Alice's Desktop computer signs a message.  Its clock is a
@@ -2645,7 +2503,7 @@ impl SubpacketAreas {
             = match (time.into(), clock_skew_tolerance.into()) {
                 (None, None) =>
                     (crate::now(),
-                     CLOCK_SKEW_TOLERANCE),
+                     *CLOCK_SKEW_TOLERANCE),
                 (None, Some(tolerance)) =>
                     (crate::now(),
                      tolerance),
@@ -2680,7 +2538,7 @@ impl SubpacketAreas {
     /// key's (*not* the signature's) creation time, which is stored
     /// in the [Key].
     ///
-    /// [Key]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.5.2
+    /// [Key]: https://tools.ietf.org/html/rfc4880#section-5.5.2
     ///
     /// A [Key Expiration Time subpacket] specifies when the
     /// associated key expires.  This is different from the [Signature
@@ -2694,11 +2552,11 @@ impl SubpacketAreas {
     /// valid if there is another valid binding signature, even if it
     /// is older than the expired signature; if the active binding
     /// signature indicates that the key has expired, then OpenPGP
-    /// implementations will not fall back to an older binding
+    /// implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     /// [`SubpacketAreas::signature_validity_period`]: Self::signature_validity_period()
     ///
     /// If the subpacket is not present in the hashed subpacket area,
@@ -2735,8 +2593,8 @@ impl SubpacketAreas {
     /// time, and the [`SubpacketAreas::key_validity_period`] method
     /// returns the subpacket's raw value.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
-    /// [Key]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.5.2
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
+    /// [Key]: https://tools.ietf.org/html/rfc4880#section-5.5.2
     /// [`SubpacketAreas::key_validity_period`]: Self::key_validity_period()
     ///
     /// The Key Expiration Time subpacket is different from the
@@ -2750,10 +2608,10 @@ impl SubpacketAreas {
     /// valid if there is another valid binding signature, even if it
     /// is older than the expired signature; if the active binding
     /// signature indicates that the key has expired, then OpenPGP
-    /// implementations will not fall back to an older binding
+    /// implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.10
     /// [`SubpacketAreas::signature_validity_period`]: Self::signature_validity_period()
     ///
     /// Because the absolute time is relative to the key's creation
@@ -2781,13 +2639,13 @@ impl SubpacketAreas {
         }
     }
 
-    /// Returns whether a key is alive at the specified
+    /// Returns whether or not a key is alive at the specified
     /// time.
     ///
     /// A [Key] is considered to be alive if `creation time -
     /// tolerance <= time` and `time < expiration time`.
     ///
-    /// [Key]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.5.2
+    /// [Key]: https://tools.ietf.org/html/rfc4880#section-5.5.2
     ///
     /// This function does not check whether the signature is alive
     /// (cf. [`SubpacketAreas::signature_alive`]), or whether the key
@@ -2806,7 +2664,7 @@ impl SubpacketAreas {
     /// This function, however, has no way to check that the signature
     /// is actually a binding signature for the specified Key.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     ///
     /// # Examples
     ///
@@ -2858,7 +2716,7 @@ impl SubpacketAreas {
     /// certificate, signatures that have this subpacket present and
     /// set to false are not serialized.
     ///
-    /// [Exportable Certification subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.19
+    /// [Exportable Certification subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.11
     /// [`Serialize::export`]: https://docs.sequoia-pgp.org/sequoia_openpgp/serialize/trait.Serialize.html#method.export
     ///
     /// Normally, you'll want to use [`Signature4::exportable`] to
@@ -2867,7 +2725,7 @@ impl SubpacketAreas {
     /// [Revocation Key subpackets], which also shouldn't be exported.
     ///
     /// [`Signature4::exportable`]: super::Signature4::exportable()
-    /// [Revocation Key subpackets]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+    /// [Revocation Key subpackets]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
     ///
     /// If the subpacket is not present in the hashed subpacket area,
     /// this returns `None`.
@@ -2894,7 +2752,7 @@ impl SubpacketAreas {
     /// The [Trust Signature subpacket] indicates the degree to which
     /// a certificate holder is trusted to certify other keys.
     ///
-    /// [Trust Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
+    /// [Trust Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
     ///
     /// A level of 0 means that the certificate holder is not trusted
     /// to certificate other keys, a level of 1 means that the
@@ -2940,8 +2798,8 @@ impl SubpacketAreas {
     /// company has a CA and you only want to trust them to certify
     /// their own employees.
     ///
-    /// [Trust Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
-    /// [Regular Expression subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.22
+    /// [Trust Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
+    /// [Regular Expression subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.14
     /// [`SubpacketAreas::trust_signature`]: Self::trust_signature()
     ///
     /// Note: The serialized form includes a trailing `NUL` byte.
@@ -2968,9 +2826,9 @@ impl SubpacketAreas {
     /// [Signature Target subpacket] (accessed using the
     /// [`SubpacketAreas::signature_target`] method).
     ///
-    /// [Revocable subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.20
-    /// [Certification revocation signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
-    /// [Signature Target subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    /// [Revocable subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.12
+    /// [Certification revocation signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
+    /// [Signature Target subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     /// [`SubpacketAreas::signature_target`]: Self::signature_target()
     ///
     /// If the subpacket is not present in the hashed subpacket area,
@@ -3013,7 +2871,7 @@ impl SubpacketAreas {
     /// Due to the complexity of verifying such signatures, many
     /// OpenPGP implementations do not support this feature.
     ///
-    /// [Revocation Key subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+    /// [Revocation Key subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
     ///
     /// This returns all instance of the Revocation Key subpacket in
     /// the hashed subpacket area.
@@ -3037,7 +2895,7 @@ impl SubpacketAreas {
     /// signature authenticates the subpacket), it may be stored in the
     /// unhashed subpacket area.
     ///
-    ///   [Issuer subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [Issuer subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///
     /// This returns all instances of the Issuer subpacket in both the
     /// hashed subpacket area and the unhashed subpacket area.
@@ -3060,7 +2918,7 @@ impl SubpacketAreas {
     /// validating the signature authenticates the subpacket), it is
     /// normally stored in the unhashed subpacket area.
     ///
-    ///  [Issuer Fingerprint subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [Issuer Fingerprint subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///
     /// This returns all instances of the Issuer Fingerprint subpacket
     /// in both the hashed subpacket area and the unhashed subpacket
@@ -3088,8 +2946,8 @@ impl SubpacketAreas {
     /// for OpenPGP extensions.  This is how the [Intended Recipient
     /// subpacket] started life.
     ///
-    /// [Notation Data subpackets]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
-    /// [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    /// [Notation Data subpackets]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
+    /// [Intended Recipient subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#name-intended-recipient-fingerpr
     ///
     /// Notation names are structured, and are divided into two
     /// namespaces: the user namespace and the IETF namespace.  Names
@@ -3098,9 +2956,9 @@ impl SubpacketAreas {
     /// meaning of the notation `name@example.org`, for instance, is
     /// defined by whoever controls `example.org`.  Names in the IETF
     /// namespace do not contain an `@` and are managed by IANA.  See
-    /// [Section 5.2.3.24 of RFC 9580] for details.
+    /// [Section 5.2.3.16 of RFC 4880] for details.
     ///
-    /// [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     ///
     /// This returns all instances of the Notation Data subpacket in
     /// the hashed subpacket area.
@@ -3127,8 +2985,8 @@ impl SubpacketAreas {
     /// for OpenPGP extensions.  This is how the [Intended Recipient
     /// subpacket] started life.
     ///
-    /// [Notation Data subpackets]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
-    /// [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    /// [Notation Data subpackets]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
+    /// [Intended Recipient subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#name-intended-recipient-fingerpr
     ///
     /// Notation names are structured, and are divided into two
     /// namespaces: the user namespace and the IETF namespace.  Names
@@ -3137,9 +2995,9 @@ impl SubpacketAreas {
     /// meaning of the notation `name@example.org`, for instance, is
     /// defined by whoever controls `example.org`.  Names in the IETF
     /// namespace do not contain an `@` and are managed by IANA.  See
-    /// [Section 5.2.3.24 of RFC 9580] for details.
+    /// [Section 5.2.3.16 of RFC 4880] for details.
     ///
-    /// [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     ///
     /// This returns the values of all instances of the Notation Data
     /// subpacket with the specified name in the hashed subpacket area.
@@ -3166,7 +3024,7 @@ impl SubpacketAreas {
     /// message for a recipient, the OpenPGP implementation should not
     /// use an algorithm that is not on this list.
     ///
-    /// [Preferred Symmetric Algorithms subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.14
+    /// [Preferred Symmetric Algorithms subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.7
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -3215,7 +3073,7 @@ impl SubpacketAreas {
     /// implementation should not use an algorithm that is not on this
     /// list.
     ///
-    /// [Preferred Hash Algorithms subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.16
+    /// [Preferred Hash Algorithms subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.8
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -3262,7 +3120,7 @@ impl SubpacketAreas {
     /// message for a recipient, the OpenPGP implementation should not
     /// use an algorithm that is not on the list.
     ///
-    /// [Preferred Compression Algorithms subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.17
+    /// [Preferred Compression Algorithms subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.9
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first for the
@@ -3304,16 +3162,18 @@ impl SubpacketAreas {
         }
     }
 
-    /// Returns the value of the Preferred AEAD Ciphersuites subpacket.
+    /// Returns the value of the Preferred AEAD Algorithms subpacket.
     ///
-    /// The [Preferred AEAD Ciphersuites subpacket] indicates what
-    /// AEAD ciphersuites (i.e. pairs of symmetric algorithm and AEAD
-    /// algorithm) the key holder prefers ordered by preference.  If
-    /// this is set, then the SEIPDv2 feature flag should in the
+    /// The [Preferred AEAD Algorithms subpacket] indicates what AEAD
+    /// algorithms the key holder prefers ordered by preference.  If
+    /// this is set, then the AEAD feature flag should in the
     /// [Features subpacket] should also be set.
     ///
-    /// [Preferred AEAD Ciphersuites subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-preferred-aead-ciphersuites
-    /// [Features subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#features-subpacket
+    /// Note: because support for AEAD has not yet been standardized,
+    /// we recommend not yet advertising support for it.
+    ///
+    /// [Preferred AEAD Algorithms subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.8
+    /// [Features subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.25
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -3337,15 +3197,14 @@ impl SubpacketAreas {
     /// Note: if the signature contains multiple instances of this
     /// subpacket in the hashed subpacket area, the last one is
     /// returned.
-    pub fn preferred_aead_ciphersuites(&self)
-        -> Option<&[(SymmetricAlgorithm, AEADAlgorithm)]>
-    {
-        if let Some(sb) = self.subpacket(
-            SubpacketTag::PreferredAEADCiphersuites)
-        {
-            if let SubpacketValue::PreferredAEADCiphersuites(v)
-                = &sb.value
-            {
+    pub fn preferred_aead_algorithms(&self)
+                                     -> Option<&[AEADAlgorithm]> {
+        // array of one-octet values
+        if let Some(sb)
+                = self.subpacket(
+                    SubpacketTag::PreferredAEADAlgorithms) {
+            if let SubpacketValue::PreferredAEADAlgorithms(v)
+                    = &sb.value {
                 Some(v)
             } else {
                 None
@@ -3360,7 +3219,7 @@ impl SubpacketAreas {
     /// The [Key Server Preferences subpacket] indicates to key
     /// servers how they should handle the certificate.
     ///
-    /// [Key Server Preferences subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.25
+    /// [Key Server Preferences subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.17
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first for the
@@ -3408,7 +3267,7 @@ impl SubpacketAreas {
     /// cautiously, because it can be used by a certificate holder to
     /// track communication partners.
     ///
-    /// [Preferred Key Server subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.26
+    /// [Preferred Key Server subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.18
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -3452,7 +3311,7 @@ impl SubpacketAreas {
     /// which contains information about the conditions under which
     /// the signature was made.
     ///
-    /// [Policy URI subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.28
+    /// [Policy URI subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.20
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -3499,7 +3358,7 @@ impl SubpacketAreas {
     /// [`ValidCert::primary_userid`] for an explanation of how
     /// Sequoia resolves this ambiguity.
     ///
-    /// [Primary User ID subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.27
+    /// [Primary User ID subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.19
     /// [`ValidCert::primary_userid`]: crate::cert::ValidCert::primary_userid()
     ///
     /// If the subpacket is not present in the hashed subpacket area,
@@ -3535,7 +3394,7 @@ impl SubpacketAreas {
     /// packet, then the primary key should be assumed to be
     /// certification capable.
     ///
-    /// [Key Flags subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.29
+    /// [Key Flags subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.21
     ///
     /// If the subpacket is not present in the hashed subpacket area,
     /// this returns `None`.
@@ -3564,7 +3423,7 @@ impl SubpacketAreas {
     /// not uncommon to use the same certificate in private as well as
     /// for a club.
     ///
-    /// [Signer's User ID subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.30
+    /// [Signer's User ID subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.22
     ///
     /// If the subpacket is not present in the hashed subpacket area,
     /// this returns `None`.
@@ -3590,7 +3449,7 @@ impl SubpacketAreas {
     ///
     /// The [Reason For Revocation subpacket] indicates why a key,
     /// User ID, or User Attribute is being revoked.  It includes both
-    /// a machine-readable code, and a human-readable string.  The
+    /// a machine readable code, and a human-readable string.  The
     /// code is essential as it indicates to the OpenPGP
     /// implementation that reads the certificate whether the key was
     /// compromised (a hard revocation), or is no longer used (a soft
@@ -3599,7 +3458,7 @@ impl SubpacketAreas {
     /// whereas in the latter case, past signatures can still be
     /// considered valid.
     ///
-    /// [Reason For Revocation subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.31
+    /// [Reason For Revocation subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.23
     ///
     /// If the subpacket is not present in the hashed subpacket area,
     /// this returns `None`.
@@ -3634,7 +3493,7 @@ impl SubpacketAreas {
     /// recipients support from contextual clues, e.g., their past
     /// behavior.
     ///
-    /// [Features subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.32
+    /// [Features subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.24
     /// [features]: crate::types::Features
     ///
     /// This subpacket is a type of preference.  When looking up a
@@ -3679,7 +3538,7 @@ impl SubpacketAreas {
     /// by timestamp signatures.  It contains a hash of the target
     /// signature.
     ///
-    ///   [Signature Target subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    ///   [Signature Target subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     ///
     /// If the subpacket is not present in the hashed subpacket area,
     /// this returns `None`.
@@ -3714,8 +3573,8 @@ impl SubpacketAreas {
     /// information is self-authenticating, it is usually stored in
     /// the unhashed subpacket area.
     ///
-    /// [Embedded Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
-    /// [Primary Key Binding signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    /// [Embedded Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
+    /// [Primary Key Binding signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// If the subpacket is not present in the hashed subpacket area
     /// or in the unhashed subpacket area, this returns `None`.
@@ -3747,8 +3606,8 @@ impl SubpacketAreas {
     /// information is self-authenticating, it is usually stored in
     /// the unhashed subpacket area.
     ///
-    /// [Embedded Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
-    /// [Primary Key Binding signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    /// [Embedded Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
+    /// [Primary Key Binding signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// If the subpacket is not present in the hashed subpacket area
     /// or in the unhashed subpacket area, this returns `None`.
@@ -3776,7 +3635,7 @@ impl SubpacketAreas {
     /// The [Intended Recipient subpacket] holds the fingerprint of a
     /// certificate.
     ///
-    ///   [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    ///   [Intended Recipient subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.29
     ///
     /// When signing a message, the message should include one such
     /// subpacket for each intended recipient.  Note: not all messages
@@ -3811,7 +3670,7 @@ impl SubpacketAreas {
             })
     }
 
-    /// Returns the digests of approved certifications.
+    /// Returns the digests of attested certifications.
     ///
     /// This feature is [experimental](crate#experimental-features).
     ///
@@ -3822,42 +3681,42 @@ impl SubpacketAreas {
     ///
     /// Note: The maximum size of the hashed signature subpacket area
     /// constrains the number of attestations that can be stored in a
-    /// signature.  If the certificate holder approved of more
-    /// certifications, the digests are split across multiple approved
-    /// certification key signatures with the same creation time.
+    /// signature.  If the certificate holder attested to more
+    /// certifications, the digests are split across multiple attested
+    /// key signatures with the same creation time.
     ///
     /// The standard strongly suggests that the digests should be
     /// sorted.  However, this function returns the digests in the
     /// order they are stored in the subpacket, which may not be
     /// sorted.
     ///
-    /// To address both issues, collect all digests from all approved
+    /// To address both issues, collect all digests from all attested
     /// key signatures with the most recent creation time into a data
     /// structure that allows efficient lookups, such as [`HashSet`]
     /// or [`BTreeSet`].
     ///
-    /// See [Section 2.2 of draft-dkg-openpgp-1pa3pc-02] for details.
+    /// See [Section 5.2.3.30 of RFC 4880bis] for details.
     ///
     ///   [`HashSet`]: std::collections::HashSet
     ///   [`BTreeSet`]: std::collections::BTreeSet
-    ///   [Section 2.2 of draft-dkg-openpgp-1pa3pc-02]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#approved-certifications-subpacket
-    pub fn approved_certifications(&self)
+    ///   [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    pub fn attested_certifications(&self)
         -> Result<impl Iterator<Item=&[u8]> + Send + Sync>
     {
         if self.hashed_area()
-            .subpackets(SubpacketTag::ApprovedCertifications).count() > 1
+            .subpackets(SubpacketTag::AttestedCertifications).count() > 1
             || self.unhashed_area()
-            .subpackets(SubpacketTag::ApprovedCertifications).count() != 0
+            .subpackets(SubpacketTag::AttestedCertifications).count() != 0
         {
             return Err(Error::BadSignature(
-                "Wrong number of approved certifications subpackets".into())
+                "Wrong number of attested certification subpackets".into())
                        .into());
         }
 
-        Ok(self.subpackets(SubpacketTag::ApprovedCertifications)
+        Ok(self.subpackets(SubpacketTag::AttestedCertifications)
            .flat_map(|sb| {
                match sb.value() {
-                   SubpacketValue::ApprovedCertifications(digests) =>
+                   SubpacketValue::AttestedCertifications(digests) =>
                        digests.iter().map(|d| d.as_ref()),
                    _ => unreachable!(),
                }
@@ -3871,12 +3730,12 @@ impl TryFrom<Signature> for Signature4 {
     fn try_from(sig: Signature) -> Result<Self> {
         match sig {
             Signature::V4(sig) => Ok(sig),
-            sig => Err(
-                Error::InvalidArgument(
-                    format!(
-                        "Got a v{}, require a v4 signature",
-                        sig.version()))
-                    .into()),
+            // XXX: Once there are more signature variants:
+            //sig => Err(
+            //    Error::InvalidArgument(
+            //        format!("Got a v{}, require a v4 signature", sig.version())
+            //            .into())
+            //        .into()),
         }
     }
 }
@@ -3924,7 +3783,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let key: Key<key::SecretParts, key::PrimaryRole>
-    /// #     = Key6::generate_ecc(true, Curve::Ed25519)?.into();
+    /// #     = Key4::generate_ecc(true, Curve::Ed25519)?.into();
     /// # let mut signer = key.into_keypair()?;
     /// # let msg = b"Hello, World";
     /// #
@@ -3962,7 +3821,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let key: Key<key::SecretParts, key::PrimaryRole>
-    /// #     = Key6::generate_ecc(true, Curve::Ed25519)?.into();
+    /// #     = Key4::generate_ecc(true, Curve::Ed25519)?.into();
     /// # let mut signer = key.into_keypair()?;
     /// # let msg = b"Hello, World";
     /// #
@@ -4011,7 +3870,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     ///
     /// let (cert, _) =
-    ///     CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///     .generate()?;
     /// let mut signer = cert.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     ///
@@ -4070,7 +3929,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let key: Key<key::SecretParts, key::PrimaryRole>
-    /// #     = Key6::generate_ecc(true, Curve::Ed25519)?.into();
+    /// #     = Key4::generate_ecc(true, Curve::Ed25519)?.into();
     /// # let mut signer = key.into_keypair()?;
     /// # let msg = b"Hello, World";
     /// #
@@ -4108,7 +3967,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let key: Key<key::SecretParts, key::PrimaryRole>
-    /// #     = Key6::generate_ecc(true, Curve::Ed25519)?.into();
+    /// #     = Key4::generate_ecc(true, Curve::Ed25519)?.into();
     /// # let mut signer = key.into_keypair()?;
     /// # let msg = b"Hello, World";
     /// #
@@ -4171,7 +4030,7 @@ impl signature::SignatureBuilder {
     ///     .sign_direct_key(&mut signer, None)?;
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(())
     /// # }
@@ -4227,7 +4086,7 @@ impl signature::SignatureBuilder {
     /// }
     ///
     /// // Merge in the new signatures.
-    /// let cert = cert.insert_packets(sigs)?.0;
+    /// let cert = cert.insert_packets(sigs)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(())
     /// # }
@@ -4255,10 +4114,11 @@ impl signature::SignatureBuilder {
     ///
     /// When creating a signature using a SignatureBuilder or the
     /// [streaming `Signer`], it is not necessary to explicitly set
-    /// this subpacket: those functions automatically set the
-    /// signature creation time, if it has not been set explicitly.
+    /// this subpacket: those functions automatically set both the
+    /// [Issuer Fingerprint subpacket] and the Issuer subpacket, if
+    /// they have not been set explicitly.
     ///
-    /// [Signature Creation Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Signature Creation Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     /// [streaming `Signer`]: crate::serialize::stream::Signer
     ///
     /// # Examples
@@ -4274,7 +4134,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (cert, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     // We also need to backdate the certificate.
     /// #     .set_creation_time(
     /// #         std::time::SystemTime::now()
@@ -4297,12 +4157,13 @@ impl signature::SignatureBuilder {
         -> Result<Self>
         where T: Into<time::SystemTime>
     {
+        self.overrode_creation_time = true;
+
         self.hashed_area.replace(Subpacket::new(
             SubpacketValue::SignatureCreationTime(
                 creation_time.into().try_into()?),
             true)?)?;
 
-        self.overrode_creation_time = true;
         Ok(self)
     }
 
@@ -4318,7 +4179,7 @@ impl signature::SignatureBuilder {
     /// `Signature Creation Time` subpacket.
     ///
     /// [`Signature`]: super::Signature
-    /// [Signature Creation Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Signature Creation Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///
     /// This function returns an error if there is no cached
     /// `Signature Creation Time` subpacket.
@@ -4337,12 +4198,12 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alice, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alice.primary_key().key().clone()
     /// #     .parts_into_secret()?.into_keypair()?;
     /// # let (bob, _) =
-    /// #     CertBuilder::general_purpose(Some("bob@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("bob@example.org"))
     /// #     .generate()?;
     /// # let mut bobs_signer = bob.primary_key().key().clone()
     /// #     .parts_into_secret()?.into_keypair()?;
@@ -4381,9 +4242,9 @@ impl signature::SignatureBuilder {
     /// subpacket] is added to the hashed area if one hasn't been
     /// added already.  This function suppresses that behavior.
     ///
-    /// [Signature Creation Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Signature Creation Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///
-    /// [Section 5.2.3.11 of RFC 9580] says that the `Signature
+    /// [Section 5.2.3.4 of RFC 4880] says that the `Signature
     /// Creation Time` subpacket must be present in the hashed area.
     /// This function clears any `Signature Creation Time` subpackets
     /// from both the hashed area and the unhashed area, and causes
@@ -4391,7 +4252,7 @@ impl signature::SignatureBuilder {
     /// `Signature Creation Time` subpacket.  This function should
     /// only be used for generating test data.
     ///
-    /// [Section 5.2.3.11 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Section 5.2.3.4 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     ///
     /// # Examples
     ///
@@ -4409,7 +4270,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (cert, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut signer = cert.primary_key().key().clone()
     /// #     .parts_into_secret()?.into_keypair()?;
@@ -4431,85 +4292,12 @@ impl signature::SignatureBuilder {
     pub fn suppress_signature_creation_time(mut self)
         -> Result<Self>
     {
+        self.overrode_creation_time = true;
+
         self.hashed_area.remove_all(SubpacketTag::SignatureCreationTime);
         self.unhashed_area.remove_all(SubpacketTag::SignatureCreationTime);
 
-        self.overrode_creation_time = true;
         Ok(self)
-    }
-
-    /// Returns the value of the Signature Expiration Time subpacket
-    /// as an absolute time.
-    ///
-    /// A [Signature Expiration Time subpacket] specifies when the
-    /// signature expires.  The value stored is not an absolute time,
-    /// but a duration, which is relative to the Signature's creation
-    /// time.  To better reflect the subpacket's name, this method
-    /// returns the absolute expiry time, and the
-    /// [`SubpacketAreas::signature_validity_period`] method returns
-    /// the subpacket's raw value.
-    ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
-    /// [`SubpacketAreas::signature_validity_period`]: SubpacketAreas::signature_validity_period()
-    ///
-    /// The Signature Expiration Time subpacket is different from the
-    /// [Key Expiration Time subpacket], which is accessed using
-    /// [`SubpacketAreas::key_validity_period`], and used specifies
-    /// when an associated key expires.  The difference is that in the
-    /// former case, the signature itself expires, but in the latter
-    /// case, only the associated key expires.  This difference is
-    /// critical: if a binding signature expires, then an OpenPGP
-    /// implementation will still consider the associated key to be
-    /// valid if there is another valid binding signature, even if it
-    /// is older than the expired signature; if the active binding
-    /// signature indicates that the key has expired, then OpenPGP
-    /// implementations will not fall back to an older binding
-    /// signature.
-    ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
-    /// [`SubpacketAreas::key_validity_period`]: SubpacketAreas::key_validity_period()
-    ///
-    /// There are several cases where having a signature expire is
-    /// useful.  Say Alice certifies Bob's certificate for
-    /// `bob@example.org`.  She can limit the lifetime of the
-    /// certification to force her to reevaluate the certification
-    /// shortly before it expires.  For instance, is Bob still
-    /// associated with `example.org`?  Does she have reason to
-    /// believe that his key has been compromised?  Using an
-    /// expiration is common in the X.509 ecosystem.  For instance,
-    /// [Let's Encrypt] issues certificates with 90-day lifetimes.
-    ///
-    /// [Let's Encrypt]: https://letsencrypt.org/2015/11/09/why-90-days.html
-    ///
-    /// Having signatures expire can also be useful when deploying
-    /// software.  For instance, you might have a service that
-    /// installs an update if it has been signed by a trusted
-    /// certificate.  To prevent an adversary from coercing the
-    /// service to install an older version, you could limit the
-    /// signature's lifetime to just a few minutes.
-    ///
-    /// If the subpacket is not present in the hashed subpacket area,
-    /// this returns `None`.  If this function returns `None`, the
-    /// signature does not expire.
-    ///
-    /// Note: if the signature contains multiple instances of this
-    /// subpacket in the hashed subpacket area, the last one is
-    /// returned.
-    // Note: This shadows SubpacketAreas::signature_expiration_time
-    // (SignatureBuilder derefs to SubpacketAreas), because we need to
-    // take SignatureBuilder::reference_time into account.
-    //
-    // If you update this function, also update
-    // SubpacketAreas::signature_expiration_time.
-    pub fn signature_expiration_time(&self) -> Option<time::SystemTime> {
-        match (self.effective_signature_creation_time(),
-               // This ^ is the difference to
-               // SubpacketAreas::signature_expiration_time.
-               self.signature_validity_period())
-        {
-            (Ok(Some(ct)), Some(vp)) if vp.as_secs() > 0 => Some(ct + vp),
-            _ => None,
-        }
     }
 
     /// Sets the Signature Expiration Time subpacket.
@@ -4518,7 +4306,7 @@ impl signature::SignatureBuilder {
     /// subpacket area.  This function first removes any Signature
     /// Expiration Time subpacket from the hashed subpacket area.
     ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.18
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.10
     ///
     /// This function is called `set_signature_validity_period` and
     /// not `set_signature_expiration_time`, which would be more
@@ -4528,7 +4316,7 @@ impl signature::SignatureBuilder {
     /// signature's [Signature Creation Time subpacket] and set using
     /// [`SignatureBuilder::set_signature_creation_time`].
     ///
-    /// [Signature Creation Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.11
+    /// [Signature Creation Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.4
     /// [`SignatureBuilder::set_signature_creation_time`]: super::SignatureBuilder::set_signature_creation_time()
     ///
     /// A Signature Expiration Time subpacket specifies when the
@@ -4543,10 +4331,10 @@ impl signature::SignatureBuilder {
     /// key to be valid if there is another valid binding signature,
     /// even if it is older than the expired signature; if the active
     /// binding signature indicates that the key has expired, then
-    /// OpenPGP implementations will not fall back to an older binding
+    /// OpenPGP implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     /// [`SignatureBuilder::set_key_validity_period`]: super::SignatureBuilder::set_key_validity_period()
     ///
     /// There are several cases where having a signature expire is
@@ -4582,7 +4370,7 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// let (cert, _) =
-    ///     CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let mut signer = cert.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
@@ -4618,7 +4406,7 @@ impl signature::SignatureBuilder {
     ///
     /// # fn main() -> openpgp::Result<()> {
     /// let (cert, _) =
-    ///     CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let mut signer = cert.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
@@ -4675,7 +4463,7 @@ impl signature::SignatureBuilder {
     /// subpacket area.  This function first removes any Exportable
     /// Certification subpacket from the hashed subpacket area.
     ///
-    /// [Exportable Certification subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.19
+    /// [Exportable Certification subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.11
     ///
     /// The Exportable Certification subpacket indicates whether the
     /// signature should be exported (e.g., published on a public key
@@ -4705,13 +4493,13 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (alice, _)
-    ///     = CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     = CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let mut alices_signer = alice.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
     ///
     /// let (bob, _)
-    ///     = CertBuilder::general_purpose(Some("bob@example.org"))
+    ///     = CertBuilder::general_purpose(None, Some("bob@example.org"))
     ///         .generate()?;
     /// let bobs_userid
     ///     = bob.with_policy(p, None)?.userids().nth(0).expect("Added a User ID").userid();
@@ -4728,7 +4516,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let bob = bob.insert_packets(certification)?.0;
+    /// let bob = bob.insert_packets(certification)?;
     /// # assert_eq!(bob.bad_signatures().count(), 0);
     /// # assert_eq!(bob.userids().nth(0).unwrap().certifications().count(), 1);
     /// # Ok(()) }
@@ -4748,9 +4536,9 @@ impl signature::SignatureBuilder {
     /// area.  This function first removes any Trust Signature
     /// subpacket from the hashed subpacket area.
     ///
-    /// [Trust Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
+    /// [Trust Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
     ///
-    /// The Trust Signature subpacket indicates the degree to which a
+    /// The Trust Signature subpacket indicates to degree to which a
     /// certificate holder is trusted to certify other keys.
     ///
     /// A level of 0 means that the certificate holder is not trusted
@@ -4786,13 +4574,13 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (alice, _)
-    ///     = CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     = CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let mut alices_signer = alice.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
     ///
     /// let (bob, _)
-    ///     = CertBuilder::general_purpose(Some("bob@example.org"))
+    ///     = CertBuilder::general_purpose(None, Some("bob@example.org"))
     ///         .generate()?;
     /// let bobs_userid
     ///     = bob.with_policy(p, None)?.userids().nth(0).expect("Added a User ID").userid();
@@ -4809,7 +4597,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let bob = bob.insert_packets(certification)?.0;
+    /// let bob = bob.insert_packets(certification)?;
     /// # assert_eq!(bob.bad_signatures().count(), 0);
     /// # assert_eq!(bob.userids().nth(0).unwrap().certifications().count(), 1);
     /// # Ok(()) }
@@ -4832,7 +4620,7 @@ impl signature::SignatureBuilder {
     /// area.  This function first removes any Regular Expression
     /// subpacket from the hashed subpacket area.
     ///
-    /// [Regular Expression subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.22
+    /// [Regular Expression subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.14
     ///
     /// The Regular Expression subpacket is used in conjunction with a
     /// [Trust Signature subpacket], which is set using
@@ -4841,7 +4629,7 @@ impl signature::SignatureBuilder {
     /// company has a CA and you only want to trust them to certify
     /// their own employees.
     ///
-    /// [Trust Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
+    /// [Trust Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
     /// [`SignatureBuilder::set_trust_signature`]: super::SignatureBuilder::set_trust_signature()
     ///
     /// GnuPG only supports [a limited form of regular expressions].
@@ -4871,13 +4659,13 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (alice, _)
-    ///     = CertBuilder::general_purpose(Some("Alice <alice@example.org>"))
+    ///     = CertBuilder::general_purpose(None, Some("Alice <alice@example.org>"))
     ///         .generate()?;
     /// let mut alices_signer = alice.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
     ///
     /// let (example_com, _)
-    ///     = CertBuilder::general_purpose(Some("OpenPGP CA <openpgp-ca@example.com>"))
+    ///     = CertBuilder::general_purpose(None, Some("OpenPGP CA <openpgp-ca@example.com>"))
     ///         .generate()?;
     /// let example_com_userid = example_com.with_policy(p, None)?
     ///     .userids().nth(0).expect("Added a User ID").userid();
@@ -4903,7 +4691,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let example_com = example_com.insert_packets(certification)?.0;
+    /// let example_com = example_com.insert_packets(certification)?;
     /// # assert_eq!(example_com.bad_signatures().count(), 0);
     /// # assert_eq!(example_com.userids().nth(0).unwrap().certifications().count(), 1);
     /// # Ok(()) }
@@ -4928,7 +4716,7 @@ impl signature::SignatureBuilder {
     /// subpacket area.
     ///
     /// [`SignatureBuilder::set_regular_expression`]: super::SignatureBuilder::set_regular_expression()
-    /// [Regular Expression subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.22
+    /// [Regular Expression subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.14
     ///
     /// The Regular Expression subpacket is used in conjunction with a
     /// [Trust Signature subpacket], which is set using
@@ -4937,7 +4725,7 @@ impl signature::SignatureBuilder {
     /// company has a CA and you only want to trust them to certify
     /// their own employees.
     ///
-    /// [Trust Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.21
+    /// [Trust Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.13
     /// [`SignatureBuilder::set_trust_signature`]: super::SignatureBuilder::set_trust_signature()
     ///
     /// GnuPG only supports [a limited form of regular expressions].
@@ -4967,13 +4755,13 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (alice, _)
-    ///     = CertBuilder::general_purpose(Some("Alice <alice@example.org>"))
+    ///     = CertBuilder::general_purpose(None, Some("Alice <alice@example.org>"))
     ///         .generate()?;
     /// let mut alices_signer = alice.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
     ///
     /// let (example_com, _)
-    ///     = CertBuilder::general_purpose(Some("OpenPGP CA <openpgp-ca@example.com>"))
+    ///     = CertBuilder::general_purpose(None, Some("OpenPGP CA <openpgp-ca@example.com>"))
     ///         .generate()?;
     /// let example_com_userid = example_com.with_policy(p, None)?
     ///     .userids().nth(0).expect("Added a User ID").userid();
@@ -5000,7 +4788,7 @@ impl signature::SignatureBuilder {
     /// #    2);
     ///
     /// // Merge in the new signature.
-    /// let example_com = example_com.insert_packets(certification)?.0;
+    /// let example_com = example_com.insert_packets(certification)?;
     /// # assert_eq!(example_com.bad_signatures().count(), 0);
     /// # assert_eq!(example_com.userids().nth(0).unwrap().certifications().count(), 1);
     /// # Ok(()) }
@@ -5021,7 +4809,7 @@ impl signature::SignatureBuilder {
     /// This function first removes any Revocable subpacket from the
     /// hashed subpacket area.
     ///
-    /// [Revocable subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.20
+    /// [Revocable subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.12
     ///
     /// The Revocable subpacket indicates whether a certification may
     /// be later revoked by creating a [Certification revocation
@@ -5029,8 +4817,8 @@ impl signature::SignatureBuilder {
     /// [Signature Target subpacket] (set using the
     /// [`SignatureBuilder::set_signature_target`] method).
     ///
-    /// [Certification revocation signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
-    /// [Signature Target subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    /// [Certification revocation signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
+    /// [Signature Target subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     /// [`SignatureBuilder::set_signature_target`]: super::SignatureBuilder::set_signature_target()
     ///
     /// # Examples
@@ -5053,13 +4841,13 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (alice, _)
-    ///     = CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     = CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let mut alices_signer = alice.primary_key().key().clone()
     ///     .parts_into_secret()?.into_keypair()?;
     ///
     /// let (bob, _)
-    ///     = CertBuilder::general_purpose(Some("bob@example.org"))
+    ///     = CertBuilder::general_purpose(None, Some("bob@example.org"))
     ///         .generate()?;
     /// let bobs_userid
     ///     = bob.with_policy(p, None)?.userids().nth(0).expect("Added a User ID").userid();
@@ -5082,7 +4870,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let bob = bob.insert_packets(certification)?.0;
+    /// let bob = bob.insert_packets(certification)?;
     /// # assert_eq!(bob.bad_signatures().count(), 0);
     /// # assert_eq!(bob.userids().nth(0).unwrap().certifications().count(), 1);
     /// # Ok(()) }
@@ -5103,7 +4891,7 @@ impl signature::SignatureBuilder {
     ///
     /// If `None` is given, any expiration subpacket is removed.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     ///
     /// This function is called `set_key_validity_period` and not
     /// `set_key_expiration_time`, which would be more consistent with
@@ -5112,7 +4900,7 @@ impl signature::SignatureBuilder {
     /// key's (*not* the signature's) creation time, which is stored
     /// in the [Key].
     ///
-    /// [Key]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.5.2
+    /// [Key]: https://tools.ietf.org/html/rfc4880#section-5.5.2
     ///
     /// There is a more convenient function
     /// [`SignatureBuilder::set_key_expiration_time`] that takes an
@@ -5132,10 +4920,10 @@ impl signature::SignatureBuilder {
     /// valid if there is another valid binding signature, even if it
     /// is older than the expired signature; if the active binding
     /// signature indicates that the key has expired, then OpenPGP
-    /// implementations will not fall back to an older binding
+    /// implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     /// [`SignatureBuilder::set_signature_validity_period`]: super::SignatureBuilder::set_signature_validity_period()
     ///
     /// # Examples
@@ -5155,7 +4943,7 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (cert, _) =
-    ///     CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let pk = cert.primary_key().key();
     /// let mut signer = pk.clone().parts_into_secret()?.into_keypair()?;
@@ -5163,20 +4951,20 @@ impl signature::SignatureBuilder {
     /// // Create the binding signatures.
     /// let mut sigs = Vec::new();
     ///
-    /// for ka in cert.with_policy(p, None)?.keys().subkeys() {
+    /// for key in cert.with_policy(p, None)?.keys().subkeys() {
     ///     // This reuses any existing backsignature.
-    ///     let sig = SignatureBuilder::from(ka.binding_signature().clone())
+    ///     let sig = SignatureBuilder::from(key.binding_signature().clone())
     ///         .set_key_validity_period(std::time::Duration::new(10 * 60, 0))?
-    ///         .sign_subkey_binding(&mut signer, None, ka.key())?;
+    ///         .sign_subkey_binding(&mut signer, None, &key)?;
     ///     sigs.push(sig);
     /// }
     ///
-    /// let cert = cert.insert_packets(sigs)?.0;
+    /// let cert = cert.insert_packets(sigs)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// #
     /// # // "Before"
     /// # for key in cert.with_policy(p, None)?.keys().subkeys() {
-    /// #     assert_eq!(key.bundle().self_signatures().count(), 2);
+    /// #     assert_eq!(key.bundle().self_signatures().len(), 2);
     /// #     assert!(key.alive().is_ok());
     /// # }
     /// #
@@ -5213,7 +5001,7 @@ impl signature::SignatureBuilder {
     ///
     /// If `None` is given, any expiration subpacket is removed.
     ///
-    /// [Key Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Key Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     ///
     /// This function is called `set_key_expiration_time` similar to
     /// the subpacket's name, but it takes an absolute time, whereas
@@ -5221,7 +5009,7 @@ impl signature::SignatureBuilder {
     /// (*not* the signature's) creation time, which is stored in the
     /// [Key].
     ///
-    /// [Key]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.5.2
+    /// [Key]: https://tools.ietf.org/html/rfc4880#section-5.5.2
     ///
     /// This is a more convenient function than
     /// [`SignatureBuilder::set_key_validity_period`] that takes a
@@ -5241,10 +5029,10 @@ impl signature::SignatureBuilder {
     /// valid if there is another valid binding signature, even if it
     /// is older than the expired signature; if the active binding
     /// signature indicates that the key has expired, then OpenPGP
-    /// implementations will not fall back to an older binding
+    /// implementations will not fallback to an older binding
     /// signature.
     ///
-    /// [Signature Expiration Time subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.13
+    /// [Signature Expiration Time subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.6
     /// [`SignatureBuilder::set_signature_validity_period`]: super::SignatureBuilder::set_signature_validity_period()
     ///
     /// # Examples
@@ -5265,7 +5053,7 @@ impl signature::SignatureBuilder {
     /// let p = &StandardPolicy::new();
     ///
     /// let (cert, _) =
-    ///     CertBuilder::general_purpose(Some("alice@example.org"))
+    ///     CertBuilder::general_purpose(None, Some("alice@example.org"))
     ///         .generate()?;
     /// let pk = cert.primary_key().key();
     /// let mut signer = pk.clone().parts_into_secret()?.into_keypair()?;
@@ -5273,22 +5061,22 @@ impl signature::SignatureBuilder {
     /// // Create the binding signatures.
     /// let mut sigs = Vec::new();
     ///
-    /// for ka in cert.with_policy(p, None)?.keys().subkeys() {
+    /// for key in cert.with_policy(p, None)?.keys().subkeys() {
     ///     // This reuses any existing backsignature.
-    ///     let sig = SignatureBuilder::from(ka.binding_signature().clone())
-    ///         .set_key_expiration_time(ka.key(),
+    ///     let sig = SignatureBuilder::from(key.binding_signature().clone())
+    ///         .set_key_expiration_time(&key,
     ///                                  time::SystemTime::now()
     ///                                  + time::Duration::new(10 * 60, 0))?
-    ///         .sign_subkey_binding(&mut signer, None, ka.key())?;
+    ///         .sign_subkey_binding(&mut signer, None, &key)?;
     ///     sigs.push(sig);
     /// }
     ///
-    /// let cert = cert.insert_packets(sigs)?.0;
+    /// let cert = cert.insert_packets(sigs)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// #
     /// # // "Before"
     /// # for key in cert.with_policy(p, None)?.keys().subkeys() {
-    /// #     assert_eq!(key.bundle().self_signatures().count(), 2);
+    /// #     assert_eq!(key.bundle().self_signatures().len(), 2);
     /// #     assert!(key.alive().is_ok());
     /// # }
     /// #
@@ -5340,7 +5128,7 @@ impl signature::SignatureBuilder {
     /// message for a recipient, the OpenPGP implementation should not
     /// use an algorithm that is not on this list.
     ///
-    /// [Preferred Symmetric Algorithms subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.14
+    /// [Preferred Symmetric Algorithms subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.7
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -5393,7 +5181,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -5410,13 +5198,12 @@ impl signature::SignatureBuilder {
     /// Sets the Revocation Key subpacket.
     ///
     /// Replaces any [Revocation Key subpacket] in the hashed
-    /// subpacket area with one new subpacket for each of the
-    /// specified values.  That is, unlike
-    /// [`super::SignatureBuilder::add_revocation_key`], this function
-    /// first removes any Revocation Key subpackets from the hashed
-    /// subpacket area, and then adds new ones.
+    /// subpacket area with a new subpacket containing the specified
+    /// value.  That is, this function first removes any Revocation
+    /// Key subpacket from the hashed subpacket area, and then adds a
+    /// new one.
     ///
-    /// [Revocation Key subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+    /// [Revocation Key subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
     ///
     /// A Revocation Key subpacket indicates certificates (so-called
     /// designated revokers) that are allowed to revoke the signer's
@@ -5451,10 +5238,9 @@ impl signature::SignatureBuilder {
     /// let template = alice.with_policy(p, None)?.direct_key_signature()
     ///     .expect("CertBuilder always includes a direct key signature");
     /// let sig = SignatureBuilder::from(template.clone())
-    ///     // Replace any revocation keys inherited from template.
-    ///     .set_revocation_key(
-    ///         RevocationKey::new(bob.primary_key().key().pk_algo(), bob.fingerprint(), false),
-    ///     )?
+    ///     .set_revocation_key(vec![
+    ///         RevocationKey::new(bob.primary_key().pk_algo(), bob.fingerprint(), false),
+    ///     ])?
     ///     .sign_direct_key(&mut alices_signer, None)?;
     /// # assert_eq!(sig
     /// #    .hashed_area()
@@ -5464,92 +5250,30 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let alice = alice.insert_packets(sig)?.0;
+    /// let alice = alice.insert_packets(sig)?;
     /// # assert_eq!(alice.bad_signatures().count(), 0);
     /// # assert_eq!(alice.primary_key().self_signatures().count(), 2);
     /// # Ok(()) }
     /// ```
-    pub fn set_revocation_key(mut self, rk: RevocationKey) -> Result<Self> {
+    pub fn set_revocation_key(mut self, rk: Vec<RevocationKey>) -> Result<Self> {
         self.hashed_area.remove_all(SubpacketTag::RevocationKey);
-        self.add_revocation_key(rk)
-    }
-
-    /// Adds a Revocation Key subpacket.
-    ///
-    /// Adds a [Revocation Key subpacket] to the hashed subpacket
-    /// area. Unlike [`super::SignatureBuilder::set_revocation_key`],
-    /// this function does not first remove any Revocation Key
-    /// subpackets from the hashed subpacket area.
-    ///
-    /// [Revocation Key subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
-    ///
-    /// A Revocation Key subpacket indicates certificates (so-called
-    /// designated revokers) that are allowed to revoke the signer's
-    /// certificate.  For instance, if Alice trusts Bob, she can set
-    /// him as a designated revoker.  This is useful if Alice loses
-    /// access to her key, and therefore is unable to generate a
-    /// revocation certificate on her own.  In this case, she can
-    /// still Bob to generate one on her behalf.
-    ///
-    /// Due to the complexity of verifying such signatures, many
-    /// OpenPGP implementations do not support this feature.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use sequoia_openpgp as openpgp;
-    /// use openpgp::cert::prelude::*;
-    /// use openpgp::packet::prelude::*;
-    /// # use openpgp::packet::signature::subpacket::SubpacketTag;
-    /// use openpgp::policy::StandardPolicy;
-    /// use openpgp::types::RevocationKey;
-    ///
-    /// # fn main() -> openpgp::Result<()> {
-    /// let p = &StandardPolicy::new();
-    ///
-    /// let (alice, _) = CertBuilder::new().add_userid("Alice").generate()?;
-    /// let mut alices_signer = alice.primary_key().key()
-    ///     .clone().parts_into_secret()?.into_keypair()?;
-    ///
-    /// let (bob, _) = CertBuilder::new().add_userid("Bob").generate()?;
-    ///
-    /// let template = alice.with_policy(p, None)?.direct_key_signature()
-    ///     .expect("CertBuilder always includes a direct key signature");
-    /// let sig = SignatureBuilder::from(template.clone())
-    ///     // Add to any revocation keys inherited from template.
-    ///     .add_revocation_key(
-    ///         RevocationKey::new(bob.primary_key().key().pk_algo(), bob.fingerprint(), false),
-    ///     )?
-    ///     .sign_direct_key(&mut alices_signer, None)?;
-    /// # assert_eq!(sig
-    /// #    .hashed_area()
-    /// #    .iter()
-    /// #    .filter(|sp| sp.tag() == SubpacketTag::RevocationKey)
-    /// #    .count(),
-    /// #    1);
-    ///
-    /// // Merge in the new signature.
-    /// let alice = alice.insert_packets(sig)?.0;
-    /// # assert_eq!(alice.bad_signatures().count(), 0);
-    /// # assert_eq!(alice.primary_key().self_signatures().count(), 2);
-    /// # Ok(()) }
-    /// ```
-    pub fn add_revocation_key(mut self, rk: RevocationKey) -> Result<Self> {
-        self.hashed_area.add(Subpacket::new(
-            SubpacketValue::RevocationKey(rk),
-            true)?)?;
+        for rk in rk.into_iter() {
+            self.hashed_area.add(Subpacket::new(
+                SubpacketValue::RevocationKey(rk),
+                true)?)?;
+        }
 
         Ok(self)
     }
 
-    /// Sets the Issuer subpacket.
+    /// Adds the Issuer subpacket.
     ///
     /// Adds an [Issuer subpacket] to the hashed subpacket area.
     /// Unlike [`add_issuer`], this function first removes any
     /// existing Issuer subpackets from the hashed and unhashed
     /// subpacket area.
     ///
-    ///   [Issuer subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [Issuer subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`add_issuer`]: super::SignatureBuilder::add_issuer()
     ///
     /// The Issuer subpacket is used when processing a signature to
@@ -5559,7 +5283,7 @@ impl signature::SignatureBuilder {
     /// hashed subpacket area.  This has the advantage that the signer
     /// authenticates the set of issuers.  Furthermore, it makes
     /// handling of the resulting signatures more robust: If there are
-    /// two signatures that are equal modulo the contents of the
+    /// two two signatures that are equal modulo the contents of the
     /// unhashed area, there is the question of how to merge the
     /// information in the unhashed areas.  Storing issuer information
     /// in the hashed area avoids this problem.
@@ -5572,7 +5296,7 @@ impl signature::SignatureBuilder {
     /// subpacket, if they have not been set explicitly.
     ///
     /// [streaming `Signer`]: crate::serialize::stream::Signer
-    /// [Issuer Fingerprint subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    /// [Issuer Fingerprint subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     /// [`SignatureBuilder::set_issuer_fingerprint`]: super::SignatureBuilder::set_issuer_fingerprint()
     ///
     /// # Examples
@@ -5594,11 +5318,11 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alicev4, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alicev4.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     /// # let (alicev5, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// #
     /// let msg = b"Hi!";
@@ -5639,7 +5363,7 @@ impl signature::SignatureBuilder {
     /// existing Issuer subpacket from neither the hashed nor the
     /// unhashed subpacket area.
     ///
-    ///   [Issuer subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    ///   [Issuer subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     ///   [`set_issuer`]: super::SignatureBuilder::set_issuer()
     ///
     /// The Issuer subpacket is used when processing a signature to
@@ -5649,7 +5373,7 @@ impl signature::SignatureBuilder {
     /// hashed subpacket area.  This has the advantage that the signer
     /// authenticates the set of issuers.  Furthermore, it makes
     /// handling of the resulting signatures more robust: If there are
-    /// two signatures that are equal modulo the contents of the
+    /// two two signatures that are equal modulo the contents of the
     /// unhashed area, there is the question of how to merge the
     /// information in the unhashed areas.  Storing issuer information
     /// in the hashed area avoids this problem.
@@ -5662,7 +5386,7 @@ impl signature::SignatureBuilder {
     /// subpacket, if they have not been set explicitly.
     ///
     /// [streaming `Signer`]: crate::serialize::stream::Signer
-    /// [Issuer Fingerprint subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    /// [Issuer Fingerprint subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     /// [`SignatureBuilder::set_issuer_fingerprint`]: super::SignatureBuilder::set_issuer_fingerprint()
     ///
     /// # Examples
@@ -5684,11 +5408,11 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alicev4, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alicev4.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     /// # let (alicev5, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// #
     /// let msg = b"Hi!";
@@ -5728,7 +5452,7 @@ impl signature::SignatureBuilder {
     /// function first removes any existing Notation Data subpacket
     /// with the specified name from the hashed subpacket area.
     ///
-    /// [Notation Data subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [Notation Data subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     /// [`SignatureBuilder::add_notation`]: super::SignatureBuilder::add_notation()
     ///
     /// Notations are key-value pairs.  They can be used by
@@ -5739,7 +5463,7 @@ impl signature::SignatureBuilder {
     /// extensions.  This is how the [Intended Recipient subpacket]
     /// started life.
     ///
-    /// [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    /// [Intended Recipient subpacket]:https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#name-intended-recipient-fingerpr
     ///
     /// Notation names are structured, and are divided into two
     /// namespaces: the user namespace and the IETF namespace.  Names
@@ -5748,9 +5472,9 @@ impl signature::SignatureBuilder {
     /// meaning of the notation `name@example.org`, for instance, is
     /// defined by whoever controls `example.org`.  Names in the IETF
     /// namespace do not contain an `@` and are managed by IANA.  See
-    /// [Section 5.2.3.24 of RFC 9580] for details.
+    /// [Section 5.2.3.16 of RFC 4880] for details.
     ///
-    /// [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     ///
     /// # Examples
     ///
@@ -5775,15 +5499,15 @@ impl signature::SignatureBuilder {
     ///     .clone().parts_into_secret()?.into_keypair()?;
     ///
     /// let vc = cert.with_policy(p, None)?;
-    /// let ua = vc.primary_userid().expect("Added a User ID");
+    /// let userid = vc.primary_userid().expect("Added a User ID");
     ///
-    /// let template = ua.binding_signature();
+    /// let template = userid.binding_signature();
     /// let sig = SignatureBuilder::from(template.clone())
     ///     .set_notation("proof@metacode.biz", "https://metacode.biz/@wiktor",
     ///                   NotationDataFlags::empty().set_human_readable(), false)?
     ///     .add_notation("proof@metacode.biz", "https://news.ycombinator.com/user?id=wiktor-k",
     ///                   NotationDataFlags::empty().set_human_readable(), false)?
-    ///     .sign_userid_binding(&mut signer, None, ua.userid())?;
+    ///     .sign_userid_binding(&mut signer, None, &userid)?;
     /// # assert_eq!(sig
     /// #    .hashed_area()
     /// #    .iter()
@@ -5792,7 +5516,7 @@ impl signature::SignatureBuilder {
     /// #    3);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -5821,7 +5545,7 @@ impl signature::SignatureBuilder {
     /// subpacket with the specified name from the hashed subpacket
     /// area.
     ///
-    /// [Notation Data subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [Notation Data subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     /// [`SignatureBuilder::set_notation`]: super::SignatureBuilder::set_notation()
     ///
     /// Notations are key-value pairs.  They can be used by
@@ -5832,7 +5556,7 @@ impl signature::SignatureBuilder {
     /// extensions.  This is how the [Intended Recipient subpacket]
     /// started life.
     ///
-    /// [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    /// [Intended Recipient subpacket]:https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#name-intended-recipient-fingerpr
     ///
     /// Notation names are structured, and are divided into two
     /// namespaces: the user namespace and the IETF namespace.  Names
@@ -5841,9 +5565,9 @@ impl signature::SignatureBuilder {
     /// meaning of the notation `name@example.org`, for instance, is
     /// defined by whoever controls `example.org`.  Names in the IETF
     /// namespace do not contain an `@` and are managed by IANA.  See
-    /// [Section 5.2.3.24 of RFC 9580] for details.
+    /// [Section 5.2.3.16 of RFC 4880] for details.
     ///
-    /// [Section 5.2.3.24 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.24
+    /// [Section 5.2.3.16 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.3.16
     ///
     /// # Examples
     ///
@@ -5869,15 +5593,15 @@ impl signature::SignatureBuilder {
     ///     .clone().parts_into_secret()?.into_keypair()?;
     ///
     /// let vc = cert.with_policy(p, None)?;
-    /// let ua = vc.primary_userid().expect("Added a User ID");
+    /// let userid = vc.primary_userid().expect("Added a User ID");
     ///
-    /// let template = ua.binding_signature();
+    /// let template = userid.binding_signature();
     /// let sig = SignatureBuilder::from(template.clone())
     ///     .add_notation("proof@metacode.biz", "https://metacode.biz/@wiktor",
     ///                   NotationDataFlags::empty().set_human_readable(), false)?
     ///     .add_notation("proof@metacode.biz", "https://news.ycombinator.com/user?id=wiktor-k",
     ///                   NotationDataFlags::empty().set_human_readable(), false)?
-    ///     .sign_userid_binding(&mut signer, None, ua.userid())?;
+    ///     .sign_userid_binding(&mut signer, None, &userid)?;
     /// # assert_eq!(sig
     /// #    .hashed_area()
     /// #    .iter()
@@ -5886,7 +5610,7 @@ impl signature::SignatureBuilder {
     /// #    3);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -5918,7 +5642,7 @@ impl signature::SignatureBuilder {
     /// implementation should not use an algorithm that is not on this
     /// list.
     ///
-    /// [Preferred Hash Algorithms subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.16
+    /// [Preferred Hash Algorithms subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.8
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -5971,7 +5695,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -5998,7 +5722,7 @@ impl signature::SignatureBuilder {
     /// message for a recipient, the OpenPGP implementation should not
     /// use an algorithm that is not on the list.
     ///
-    /// [Preferred Compression Algorithms subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.17
+    /// [Preferred Compression Algorithms subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.9
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -6052,7 +5776,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -6077,7 +5801,7 @@ impl signature::SignatureBuilder {
     /// The Key Server Preferences subpacket indicates to key servers
     /// how they should handle the certificate.
     ///
-    /// [Key Server Preferences subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.25
+    /// [Key Server Preferences subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.17
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -6129,7 +5853,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -6149,7 +5873,7 @@ impl signature::SignatureBuilder {
     /// subpacket area.  This function first removes any Preferred Key
     /// Server subpacket from the hashed subpacket area.
     ///
-    /// [Preferred Key Server subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.26
+    /// [Preferred Key Server subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.18
     ///
     /// The Preferred Key Server subpacket contains a link to a key
     /// server where the certificate holder plans to publish updates
@@ -6208,7 +5932,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge in the new signature.
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(()) }
     /// ```
@@ -6229,7 +5953,7 @@ impl signature::SignatureBuilder {
     /// area.  This function first removes any Primary User ID
     /// subpacket from the hashed subpacket area.
     ///
-    /// [Primary User ID subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.27
+    /// [Primary User ID subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.19
     ///
     /// The Primary User ID subpacket indicates whether the associated
     /// User ID or User Attribute should be considered the primary
@@ -6291,7 +6015,7 @@ impl signature::SignatureBuilder {
     /// }
     /// assert!(sig.is_some());
     ///
-    /// let cert = cert.insert_packets(sig)?.0;
+    /// let cert = cert.insert_packets(sig)?;
     ///
     /// assert_eq!(cert.with_policy(p, None)?.primary_userid().unwrap().userid(),
     ///            &UserID::from(home));
@@ -6312,7 +6036,7 @@ impl signature::SignatureBuilder {
     /// This function first removes any Policy URI subpacket from the
     /// hashed subpacket area.
     ///
-    /// [Policy URI subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.28
+    /// [Policy URI subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.20
     ///
     /// The Policy URI subpacket contains a link to a policy document,
     /// which contains information about the conditions under which
@@ -6371,7 +6095,7 @@ impl signature::SignatureBuilder {
     /// #    1);
     ///
     /// // Merge it into the certificate.
-    /// let alice = alice.insert_packets(sig)?.0;
+    /// let alice = alice.insert_packets(sig)?;
     /// #
     /// # assert_eq!(alice.bad_signatures().count(), 0);
     /// # Ok(())
@@ -6393,7 +6117,7 @@ impl signature::SignatureBuilder {
     /// This function first removes any Key Flags subpacket from the
     /// hashed subpacket area.
     ///
-    /// [Key Flags subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.29
+    /// [Key Flags subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.21
     ///
     /// The Key Flags subpacket describes a key's capabilities
     /// (certification capable, signing capable, etc.).  In the case
@@ -6435,7 +6159,7 @@ impl signature::SignatureBuilder {
     ///
     /// // Generate a subkey and a binding signature.
     /// let subkey: Key<_, key::SubordinateRole>
-    ///     = Key6::generate_ecc(false, Curve::Cv25519)?
+    ///     = Key4::generate_ecc(false, Curve::Cv25519)?
     ///         .into();
     /// let builder = signature::SignatureBuilder::new(SignatureType::SubkeyBinding)
     ///     .set_key_flags(KeyFlags::empty().set_storage_encryption())?;
@@ -6443,7 +6167,7 @@ impl signature::SignatureBuilder {
     ///
     /// // Now merge the key and binding signature into the Cert.
     /// let cert = cert.insert_packets(vec![Packet::from(subkey),
-    ///                                    binding.into()])?.0;
+    ///                                    binding.into()])?;
     ///
     /// # assert_eq!(cert.keys().with_policy(p, None).alive().revoked(false)
     /// #                .key_flags(&KeyFlags::empty().set_storage_encryption()).count(),
@@ -6464,7 +6188,7 @@ impl signature::SignatureBuilder {
     /// area.  This function first removes any Signer's User ID
     /// subpacket from the hashed subpacket area.
     ///
-    /// [Signer's User ID subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.30
+    /// [Signer's User ID subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.22
     ///
     /// The Signer's User ID subpacket indicates, which User ID made
     /// the signature.  This is useful when a key has multiple User
@@ -6525,11 +6249,11 @@ impl signature::SignatureBuilder {
     /// Revocation subpacket from the hashed subpacket
     /// area.
     ///
-    /// [Reason For Revocation subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.31
+    /// [Reason For Revocation subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.23
     ///
     /// The Reason For Revocation subpacket indicates why a key, User
     /// ID, or User Attribute is being revoked.  It includes both a
-    /// machine-readable code, and a human-readable string.  The code
+    /// machine readable code, and a human-readable string.  The code
     /// is essential as it indicates to the OpenPGP implementation
     /// that reads the certificate whether the key was compromised (a
     /// hard revocation), or is no longer used (a soft revocation).
@@ -6567,7 +6291,7 @@ impl signature::SignatureBuilder {
     ///     .build(&mut signer, &cert, None)?;
     ///
     /// // Merge it into the certificate.
-    /// let cert = cert.insert_packets(sig.clone())?.0;
+    /// let cert = cert.insert_packets(sig.clone())?;
     ///
     /// // Now it's revoked.
     /// assert_eq!(RevocationStatus::Revoked(vec![ &sig ]),
@@ -6611,7 +6335,7 @@ impl signature::SignatureBuilder {
     /// recipients support from contextual clues, e.g., their past
     /// behavior.
     ///
-    /// [Feature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.32
+    /// [Feature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.24
     /// [features]: crate::types::Features
     ///
     /// This subpacket is a type of preference.  When looking up a
@@ -6642,7 +6366,6 @@ impl signature::SignatureBuilder {
     /// use openpgp::types::{AEADAlgorithm, Features};
     ///
     /// # fn main() -> openpgp::Result<()> {
-    /// use sequoia_openpgp::types::SymmetricAlgorithm;
     /// let p = &StandardPolicy::new();
     ///
     /// let (cert, _) = CertBuilder::new().add_userid("Alice").generate()?;
@@ -6658,10 +6381,10 @@ impl signature::SignatureBuilder {
     /// if let Ok(sig) = vc.direct_key_signature() {
     ///     sigs.push(
     ///         SignatureBuilder::from(sig.clone())
-    ///             .set_preferred_aead_ciphersuites(vec![(SymmetricAlgorithm::AES256, AEADAlgorithm::EAX) ])?
+    ///             .set_preferred_aead_algorithms(vec![ AEADAlgorithm::EAX ])?
     ///             .set_features(
     ///                 sig.features().unwrap_or_else(Features::sequoia)
-    ///                     .set_seipdv2())?
+    ///                     .set_aead())?
     ///             .sign_direct_key(&mut signer, None)?);
     /// }
     ///
@@ -6669,15 +6392,15 @@ impl signature::SignatureBuilder {
     ///     let sig = ua.binding_signature();
     ///     sigs.push(
     ///         SignatureBuilder::from(sig.clone())
-    ///             .set_preferred_aead_ciphersuites(vec![(SymmetricAlgorithm::AES256, AEADAlgorithm::EAX) ])?
+    ///             .set_preferred_aead_algorithms(vec![ AEADAlgorithm::EAX ])?
     ///             .set_features(
     ///                 sig.features().unwrap_or_else(Features::sequoia)
-    ///                     .set_seipdv2())?
+    ///                     .set_aead())?
     ///             .sign_userid_binding(&mut signer, pk, ua.userid())?);
     /// }
     ///
     /// // Merge in the new signatures.
-    /// let cert = cert.insert_packets(sigs)?.0;
+    /// let cert = cert.insert_packets(sigs)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(())
     /// # }
@@ -6701,7 +6424,7 @@ impl signature::SignatureBuilder {
     /// by timestamp signatures.  It contains a hash of the target
     /// signature.
     ///
-    ///   [Signature Target subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.33
+    ///   [Signature Target subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.25
     pub fn set_signature_target<D>(mut self,
                                    pk_algo: PublicKeyAlgorithm,
                                    hash_algo: HashAlgorithm,
@@ -6727,7 +6450,7 @@ impl signature::SignatureBuilder {
     /// Signature subpacket from both the hashed and the unhashed
     /// subpacket area.
     ///
-    /// [Embedded Signature subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.34
+    /// [Embedded Signature subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.26
     ///
     /// The Embedded Signature subpacket is normally used to hold a
     /// [Primary Key Binding signature], which binds a
@@ -6736,7 +6459,7 @@ impl signature::SignatureBuilder {
     /// information is self-authenticating, it is usually stored in the
     /// unhashed subpacket area.
     ///
-    /// [Primary Key Binding signature]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
+    /// [Primary Key Binding signature]: https://tools.ietf.org/html/rfc4880#section-5.2.1
     ///
     /// # Examples
     ///
@@ -6775,7 +6498,7 @@ impl signature::SignatureBuilder {
     ///     .sign_subkey_binding(&mut pk_signer, None, &subkey)?;
     ///
     /// let cert = cert.insert_packets(vec![Packet::SecretSubkey(subkey),
-    ///                                    sig.into()])?.0;
+    ///                                    sig.into()])?;
     ///
     /// assert_eq!(cert.keys().count(), 2);
     /// # Ok(())
@@ -6798,7 +6521,7 @@ impl signature::SignatureBuilder {
     /// function first removes any existing Issuer Fingerprint
     /// subpackets from the hashed and unhashed subpacket area.
     ///
-    ///   [Issuer Fingerprint subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [Issuer Fingerprint subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`add_issuer_fingerprint`]: super::SignatureBuilder::add_issuer_fingerprint()
     ///
     /// The Issuer Fingerprint subpacket is used when processing a
@@ -6808,7 +6531,7 @@ impl signature::SignatureBuilder {
     /// stored in the hashed subpacket area.  This has the advantage
     /// that the signer authenticates the set of issuers.
     /// Furthermore, it makes handling of the resulting signatures
-    /// more robust: If there are two signatures that are equal
+    /// more robust: If there are two two signatures that are equal
     /// modulo the contents of the unhashed area, there is the
     /// question of how to merge the information in the unhashed
     /// areas.  Storing issuer information in the hashed area avoids
@@ -6822,7 +6545,7 @@ impl signature::SignatureBuilder {
     /// set explicitly.
     ///
     /// [streaming `Signer`]: crate::serialize::stream::Signer
-    /// [Issuer subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    /// [Issuer subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     /// [`SignatureBuilder::set_issuer`]: super::SignatureBuilder::set_issuer()
     ///
     /// # Examples
@@ -6844,11 +6567,11 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alicev4, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alicev4.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     /// # let (alicev5, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// #
     /// let msg = b"Hi!";
@@ -6890,7 +6613,7 @@ impl signature::SignatureBuilder {
     /// subpacket from neither the hashed nor the unhashed subpacket
     /// area.
     ///
-    ///   [Issuer Fingerprint subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-issuer-fingerprint
+    ///   [Issuer Fingerprint subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.28
     ///   [`set_issuer_fingerprint`]: super::SignatureBuilder::set_issuer_fingerprint()
     ///
     /// The Issuer Fingerprint subpacket is used when processing a
@@ -6900,7 +6623,7 @@ impl signature::SignatureBuilder {
     /// stored in the hashed subpacket area.  This has the advantage
     /// that the signer authenticates the set of issuers.
     /// Furthermore, it makes handling of the resulting signatures
-    /// more robust: If there are two signatures that are equal
+    /// more robust: If there are two two signatures that are equal
     /// modulo the contents of the unhashed area, there is the
     /// question of how to merge the information in the unhashed
     /// areas.  Storing issuer information in the hashed area avoids
@@ -6914,7 +6637,7 @@ impl signature::SignatureBuilder {
     /// set explicitly.
     ///
     /// [streaming `Signer`]: crate::serialize::stream::Signer
-    /// [Issuer subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.12
+    /// [Issuer subpacket]: https://tools.ietf.org/html/rfc4880#section-5.2.3.5
     /// [`SignatureBuilder::set_issuer`]: super::SignatureBuilder::set_issuer()
     ///
     /// # Examples
@@ -6936,11 +6659,11 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alicev4, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alicev4.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     /// # let (alicev5, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// #
     /// let msg = b"Hi!";
@@ -6973,24 +6696,25 @@ impl signature::SignatureBuilder {
         Ok(self)
     }
 
-    /// Sets the Preferred AEAD Ciphersuites subpacket.
+    /// Sets the Preferred AEAD Algorithms subpacket.
     ///
-    /// Replaces any [Preferred AEAD Ciphersuites subpacket] in the
+    /// Replaces any [Preferred AEAD Algorithms subpacket] in the
     /// hashed subpacket area with a new subpacket containing the
     /// specified value.  That is, this function first removes any
-    /// Preferred AEAD Ciphersuites subpacket from the hashed
-    /// subpacket area, and then adds a Preferred AEAD Ciphersuites
-    /// subpacket.
+    /// Preferred AEAD Algorithms subpacket from the hashed subpacket
+    /// area, and then adds a Preferred AEAD Algorithms subpacket.
     ///
-    /// [Preferred AEAD Ciphersuites subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-preferred-aead-ciphersuites
+    /// [Preferred AEAD Algorithms subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.8
     ///
-    /// The Preferred AEAD Ciphersuites subpacket indicates what AEAD
-    /// ciphersuites the key holder prefers ordered by preference.  If
-    /// this is set, then the `Version 2 Symmetrically Encrypted and
-    /// Integrity Protected Data packet` feature flag should in the
+    /// The Preferred AEAD Algorithms subpacket indicates what AEAD
+    /// algorithms the key holder prefers ordered by preference.  If
+    /// this is set, then the AEAD feature flag should in the
     /// [Features subpacket] should also be set.
     ///
-    /// [Features subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-features
+    /// Note: because support for AEAD has not yet been standardized,
+    /// we recommend not yet advertising support for it.
+    ///
+    /// [Features subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.25
     ///
     /// This subpacket is a type of preference.  When looking up a
     /// preference, an OpenPGP implementation should first look for
@@ -7017,7 +6741,7 @@ impl signature::SignatureBuilder {
     /// use openpgp::cert::prelude::*;
     /// use openpgp::packet::prelude::*;
     /// use openpgp::policy::StandardPolicy;
-    /// use openpgp::types::{AEADAlgorithm, Features, SymmetricAlgorithm};
+    /// use openpgp::types::{AEADAlgorithm, Features};
     ///
     /// # fn main() -> openpgp::Result<()> {
     /// let p = &StandardPolicy::new();
@@ -7028,51 +6752,43 @@ impl signature::SignatureBuilder {
     /// let pk = cert.primary_key().key();
     /// let mut signer = pk.clone().parts_into_secret()?.into_keypair()?;
     ///
-    /// // Update the cert to advocate support for SEIPDv2 with a
-    /// // preferred AEAD cipher suite.
-    /// let symm = SymmetricAlgorithm::default();
-    /// let aead = AEADAlgorithm::default();
-    ///
     /// let mut sigs = Vec::new();
     ///
     /// let vc = cert.with_policy(p, None)?;
     ///
-    /// // Update the direct key signature.
     /// if let Ok(sig) = vc.direct_key_signature() {
     ///     sigs.push(
     ///         SignatureBuilder::from(sig.clone())
-    ///             .set_preferred_aead_ciphersuites(vec![(symm, aead)])?
+    ///             .set_preferred_aead_algorithms(vec![ AEADAlgorithm::EAX ])?
     ///             .set_features(
     ///                 sig.features().unwrap_or_else(Features::sequoia)
-    ///                     .set_seipdv2())?
+    ///                     .set_aead())?
     ///             .sign_direct_key(&mut signer, None)?);
     /// }
     ///
-    /// // Update the user ID binding signatures.
     /// for ua in vc.userids() {
     ///     let sig = ua.binding_signature();
     ///     sigs.push(
     ///         SignatureBuilder::from(sig.clone())
-    ///             .set_preferred_aead_ciphersuites(vec![(symm, aead)])?
+    ///             .set_preferred_aead_algorithms(vec![ AEADAlgorithm::EAX ])?
     ///             .set_features(
     ///                 sig.features().unwrap_or_else(Features::sequoia)
-    ///                     .set_seipdv2())?
+    ///                     .set_aead())?
     ///             .sign_userid_binding(&mut signer, pk, ua.userid())?);
     /// }
     ///
     /// // Merge in the new signatures.
-    /// let cert = cert.insert_packets(sigs)?.0;
+    /// let cert = cert.insert_packets(sigs)?;
     /// # assert_eq!(cert.bad_signatures().count(), 0);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn set_preferred_aead_ciphersuites(
-        mut self,
-        preferences: Vec<(SymmetricAlgorithm, AEADAlgorithm)>)
+    pub fn set_preferred_aead_algorithms(mut self,
+                                         preferences: Vec<AEADAlgorithm>)
         -> Result<Self>
     {
         self.hashed_area.replace(Subpacket::new(
-            SubpacketValue::PreferredAEADCiphersuites(preferences),
+            SubpacketValue::PreferredAEADAlgorithms(preferences),
             false)?)?;
 
         Ok(self)
@@ -7087,7 +6803,7 @@ impl signature::SignatureBuilder {
     /// first removes any Intended Recipient subpackets from the
     /// hashed subpacket area, and then adds new ones.
     ///
-    ///   [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    ///   [Intended Recipient subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.29
     ///   [`SignatureBuilder::add_intended_recipient`]: super::SignatureBuilder::add_intended_recipient()
     ///
     /// The Intended Recipient subpacket holds the fingerprint of a
@@ -7129,14 +6845,14 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alice, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alice.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     /// # let (bob, _) =
-    /// #     CertBuilder::general_purpose(Some("bob@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("bob@example.org"))
     /// #     .generate()?;
     /// # let (carol, _) =
-    /// #     CertBuilder::general_purpose(Some("carol@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("carol@example.org"))
     /// #     .generate()?;
     /// #
     /// let msg = b"Let's do it!";
@@ -7169,7 +6885,7 @@ impl signature::SignatureBuilder {
     /// not first remove any Intended Recipient subpackets from the
     /// hashed subpacket area.
     ///
-    ///   [Intended Recipient subpacket]: https://www.rfc-editor.org/rfc/rfc9580.html#name-intended-recipient-fingerpr
+    ///   [Intended Recipient subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-09.html#section-5.2.3.29
     ///   [`SignatureBuilder::set_intended_recipients`]: super::SignatureBuilder::set_intended_recipients()
     ///
     /// The Intended Recipient subpacket holds the fingerprint of a
@@ -7214,14 +6930,14 @@ impl signature::SignatureBuilder {
     /// # fn main() -> openpgp::Result<()> {
     /// #
     /// # let (alice, _) =
-    /// #     CertBuilder::general_purpose(Some("alice@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("alice@example.org"))
     /// #     .generate()?;
     /// # let mut alices_signer = alice.primary_key().key().clone().parts_into_secret()?.into_keypair()?;
     /// # let (bob, _) =
-    /// #     CertBuilder::general_purpose(Some("bob@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("bob@example.org"))
     /// #     .generate()?;
     /// # let (carol, _) =
-    /// #     CertBuilder::general_purpose(Some("carol@example.org"))
+    /// #     CertBuilder::general_purpose(None, Some("carol@example.org"))
     /// #     .generate()?;
     /// #
     /// let msg = b"Let's do it!";
@@ -7245,7 +6961,7 @@ impl signature::SignatureBuilder {
         Ok(self)
     }
 
-    /// Adds an approved certifications subpacket.
+    /// Adds an attested certifications subpacket.
     ///
     /// This feature is [experimental](crate#experimental-features).
     ///
@@ -7254,7 +6970,7 @@ impl signature::SignatureBuilder {
     /// certificate.  This can be used to address certificate flooding
     /// concerns.
     ///
-    /// Sorts the digests and adds an [Approved Certification
+    /// Sorts the digests and adds an [Attested Certification
     /// subpacket] to the hashed subpacket area.  The digests must be
     /// calculated using the same hash algorithm that is used in the
     /// resulting signature.  To attest a signature, hash it with
@@ -7263,13 +6979,14 @@ impl signature::SignatureBuilder {
     /// Note: The maximum size of the hashed signature subpacket area
     /// constrains the number of attestations that can be stored in a
     /// signature.  If you need to attest to more certifications,
-    /// split the digests into chunks and create multiple approved key
+    /// split the digests into chunks and create multiple attested key
     /// signatures with the same creation time.
     ///
-    /// See [Approved Certification subpacket] for details.
+    /// See [Section 5.2.3.30 of RFC 4880bis] for details.
     ///
-    ///   [Approved Certification subpacket]: https://www.ietf.org/archive/id/draft-dkg-openpgp-1pa3pc-02.html#approved-certifications-subpacket
-    pub fn set_approved_certifications<A, C>(mut self, certifications: C)
+    ///   [Section 5.2.3.30 of RFC 4880bis]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    ///   [Attested Certification subpacket]: https://tools.ietf.org/html/draft-ietf-openpgp-rfc4880bis-10.html#section-5.2.3.30
+    pub fn set_attested_certifications<A, C>(mut self, certifications: C)
                                              -> Result<Self>
     where C: IntoIterator<Item = A>,
           A: AsRef<[u8]>,
@@ -7291,7 +7008,7 @@ impl signature::SignatureBuilder {
 
         self.hashed_area_mut().replace(
             Subpacket::new(
-                SubpacketValue::ApprovedCertifications(digests),
+                SubpacketValue::AttestedCertifications(digests),
                 true)?)?;
 
         Ok(self)
@@ -7304,11 +7021,11 @@ fn accessors() {
 
     let pk_algo = PublicKeyAlgorithm::EdDSA;
     let hash_algo = HashAlgorithm::SHA512;
+    let hash = hash_algo.context().unwrap();
     let mut sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);
     let mut key: crate::packet::key::SecretKey =
-        crate::packet::key::Key6::generate_ecc(true, Curve::Ed25519).unwrap().into();
+        crate::packet::key::Key4::generate_ecc(true, Curve::Ed25519).unwrap().into();
     let mut keypair = key.clone().into_keypair().unwrap();
-    let hash = hash_algo.context().unwrap().for_signature(key.version());
 
     // Cook up a timestamp without ns resolution.
     use std::convert::TryFrom;
@@ -7405,20 +7122,12 @@ fn accessors() {
         sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
     assert_eq!(sig_.preferred_symmetric_algorithms(), Some(&pref[..]));
 
-    let fp = Fingerprint::from_bytes(4, b"bbbbbbbbbbbbbbbbbbbb").unwrap();
+    let fp = Fingerprint::from_bytes(b"bbbbbbbbbbbbbbbbbbbb");
     let rk = RevocationKey::new(pk_algo, fp.clone(), true);
-    sig = sig.set_revocation_key(rk.clone()).unwrap();
-    sig = sig.set_revocation_key(rk.clone()).unwrap();
+    sig = sig.set_revocation_key(vec![ rk.clone() ]).unwrap();
     let sig_ =
         sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
     assert_eq!(sig_.revocation_keys().next().unwrap(), &rk);
-    assert_eq!(sig_.revocation_keys().count(), 1);
-
-    sig = sig.add_revocation_key(rk.clone()).unwrap();
-    sig = sig.add_revocation_key(rk.clone()).unwrap();
-    let sig_ =
-        sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
-    assert_eq!(sig_.revocation_keys().count(), 3);
 
     sig = sig.set_issuer(fp.clone().into()).unwrap();
     let sig_ =
@@ -7483,19 +7192,19 @@ fn accessors() {
     assert_eq!(sig_.reason_for_revocation(),
                Some((ReasonForRevocation::KeyRetired, &b"foobar"[..])));
 
-    let feats = Features::empty().set_seipdv1();
+    let feats = Features::empty().set_mdc();
     sig = sig.set_features(feats.clone()).unwrap();
     let sig_ =
         sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
     assert_eq!(sig_.features().unwrap(), feats);
 
-    let feats = Features::empty().set_seipdv2();
+    let feats = Features::empty().set_aead();
     sig = sig.set_features(feats.clone()).unwrap();
     let sig_ =
         sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
     assert_eq!(sig_.features().unwrap(), feats);
 
-    let digest = vec![0; hash_algo.digest_size().unwrap()];
+    let digest = vec![0; hash_algo.context().unwrap().digest_size()];
     sig = sig.set_signature_target(pk_algo, hash_algo, &digest).unwrap();
     let sig_ =
         sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
@@ -7515,16 +7224,16 @@ fn accessors() {
     assert_eq!(sig_.issuer_fingerprints().collect::<Vec<_>>(),
                vec![ &fp ]);
 
-    let pref = vec![(SymmetricAlgorithm::AES128, AEADAlgorithm::EAX),
-                    (SymmetricAlgorithm::AES128, AEADAlgorithm::OCB)];
-    sig = sig.set_preferred_aead_ciphersuites(pref.clone()).unwrap();
+    let pref = vec![AEADAlgorithm::EAX,
+                    AEADAlgorithm::OCB];
+    sig = sig.set_preferred_aead_algorithms(pref.clone()).unwrap();
     let sig_ =
         sig.clone().sign_hash(&mut keypair, hash.clone()).unwrap();
-    assert_eq!(sig_.preferred_aead_ciphersuites(), Some(&pref[..]));
+    assert_eq!(sig_.preferred_aead_algorithms(), Some(&pref[..]));
 
     let fps = vec![
-        Fingerprint::from_bytes(4, b"aaaaaaaaaaaaaaaaaaaa").unwrap(),
-        Fingerprint::from_bytes(4, b"bbbbbbbbbbbbbbbbbbbb").unwrap(),
+        Fingerprint::from_bytes(b"aaaaaaaaaaaaaaaaaaaa"),
+        Fingerprint::from_bytes(b"bbbbbbbbbbbbbbbbbbbb"),
     ];
     sig = sig.set_intended_recipients(fps.clone()).unwrap();
     let sig_ =
@@ -7561,7 +7270,7 @@ fn subpacket_test_1 () {
     use crate::PacketPile;
     use crate::parse::Parse;
 
-    let pile = PacketPile::from_bytes(crate::tests::message("signed.pgp")).unwrap();
+    let pile = PacketPile::from_bytes(crate::tests::message("signed.gpg")).unwrap();
     eprintln!("PacketPile has {} top-level packets.", pile.children().len());
     eprintln!("PacketPile: {:?}", pile);
 
@@ -7604,7 +7313,6 @@ fn subpacket_test_1 () {
 }
 
 #[test]
-#[allow(deprecated)]
 fn subpacket_test_2() {
     use crate::Packet;
     use crate::parse::Parse;
@@ -7639,7 +7347,7 @@ fn subpacket_test_2() {
     // XXX: The subpackets marked with * are not tested.
 
     let pile = PacketPile::from_bytes(
-        crate::tests::key("subpackets/shaw.pgp")).unwrap();
+        crate::tests::key("subpackets/shaw.gpg")).unwrap();
 
     // Test #1
     if let (Some(&Packet::PublicKey(ref key)),
@@ -7671,7 +7379,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::SignatureCreationTime(
                            1515791508.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         // The signature does not expire.
@@ -7685,7 +7393,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::KeyExpirationTime(
                            63072000.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         // Check key expiration.
@@ -7713,7 +7421,7 @@ fn subpacket_test_2() {
                                 SymmetricAlgorithm::AES128,
                                 SymmetricAlgorithm::TripleDES]
                        ),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.preferred_hash_algorithms(),
@@ -7733,7 +7441,7 @@ fn subpacket_test_2() {
                                 HashAlgorithm::SHA224,
                                 HashAlgorithm::SHA1]
                        ),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.preferred_compression_algorithms(),
@@ -7749,7 +7457,7 @@ fn subpacket_test_2() {
                                 CompressionAlgorithm::BZip2,
                                 CompressionAlgorithm::Zip]
                        ),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.key_server_preferences().unwrap(),
@@ -7760,7 +7468,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::KeyServerPreferences(
                            KeyServerPreferences::empty().set_no_modify()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert!(sig.key_flags().unwrap().for_certification());
@@ -7771,17 +7479,17 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::KeyFlags(
                            KeyFlags::empty().set_certification().set_signing()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
-        assert_eq!(sig.features().unwrap(), Features::empty().set_seipdv1());
+        assert_eq!(sig.features().unwrap(), Features::empty().set_mdc());
         assert_eq!(sig.subpacket(SubpacketTag::Features),
                    Some(&Subpacket {
                        length: 2.into(),
                        critical: false,
                        value: SubpacketValue::Features(
-                           Features::empty().set_seipdv1()),
-                       authenticated: false.into(),
+                           Features::empty().set_mdc()),
+                       authenticated: false,
                    }));
 
         let keyid = "F004 B9A4 5C58 6126".parse().unwrap();
@@ -7791,7 +7499,7 @@ fn subpacket_test_2() {
                        length: 9.into(),
                        critical: false,
                        value: SubpacketValue::Issuer(keyid),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let fp = "361A96BDE1A65B6D6C25AE9FF004B9A45C586126".parse().unwrap();
@@ -7801,7 +7509,7 @@ fn subpacket_test_2() {
                        length: 22.into(),
                        critical: false,
                        value: SubpacketValue::IssuerFingerprint(fp),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let n = NotationData {
@@ -7816,7 +7524,7 @@ fn subpacket_test_2() {
                        length: 32.into(),
                        critical: false,
                        value: SubpacketValue::NotationData(n.clone()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
         assert_eq!(sig.hashed_area().subpackets(SubpacketTag::NotationData)
                    .collect::<Vec<_>>(),
@@ -7824,7 +7532,7 @@ fn subpacket_test_2() {
                        length: 32.into(),
                        critical: false,
                        value: SubpacketValue::NotationData(n.clone()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }]);
     } else {
         panic!("Expected signature!");
@@ -7851,7 +7559,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::SignatureCreationTime(
                            1515791490.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.exportable_certification(), Some(false));
@@ -7860,12 +7568,12 @@ fn subpacket_test_2() {
                        length: 2.into(),
                        critical: false,
                        value: SubpacketValue::ExportableCertification(false),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
     }
 
     let pile = PacketPile::from_bytes(
-        crate::tests::key("subpackets/marven.pgp")).unwrap();
+        crate::tests::key("subpackets/marven.gpg")).unwrap();
 
     // Test #3
     if let Some(&Packet::Signature(ref sig)) = pile.children().nth(1) {
@@ -7889,7 +7597,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::SignatureCreationTime(
                            1515791376.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.revocable(), Some(false));
@@ -7898,7 +7606,7 @@ fn subpacket_test_2() {
                        length: 2.into(),
                        critical: false,
                        value: SubpacketValue::Revocable(false),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let fp = "361A96BDE1A65B6D6C25AE9FF004B9A45C586126".parse().unwrap();
@@ -7910,7 +7618,7 @@ fn subpacket_test_2() {
                        length: 23.into(),
                        critical: false,
                        value: SubpacketValue::RevocationKey(rk),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
 
@@ -7922,7 +7630,7 @@ fn subpacket_test_2() {
                        length: 9.into(),
                        critical: false,
                        value: SubpacketValue::Issuer(keyid),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let fp = "B59B8817F519DCE10AFD85E4CEAD062109347957".parse().unwrap();
@@ -7933,7 +7641,7 @@ fn subpacket_test_2() {
                        length: 22.into(),
                        critical: false,
                        value: SubpacketValue::IssuerFingerprint(fp),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         // This signature does not contain any notation data.
@@ -7961,7 +7669,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::SignatureCreationTime(
                            1515886658.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.reason_for_revocation(),
@@ -7975,7 +7683,7 @@ fn subpacket_test_2() {
                            code: ReasonForRevocation::Unspecified,
                            reason: b"Forgot to set a sig expiration.".to_vec(),
                        },
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
     }
 
@@ -7993,7 +7701,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::SignatureCreationTime(
                            1515791467.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let n1 = NotationData {
@@ -8022,7 +7730,7 @@ fn subpacket_test_2() {
                        length: 35.into(),
                        critical: false,
                        value: SubpacketValue::NotationData(n3.clone()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         // We expect all three notations, in order.
@@ -8033,19 +7741,19 @@ fn subpacket_test_2() {
                            length: 38.into(),
                            critical: false,
                            value: SubpacketValue::NotationData(n1),
-                           authenticated: false.into(),
+                           authenticated: false,
                        },
                        &Subpacket {
                            length: 24.into(),
                            critical: false,
                            value: SubpacketValue::NotationData(n2),
-                           authenticated: false.into(),
+                           authenticated: false,
                        },
                        &Subpacket {
                            length: 35.into(),
                            critical: false,
                            value: SubpacketValue::NotationData(n3),
-                           authenticated: false.into(),
+                           authenticated: false,
                        },
                    ]);
     }
@@ -8074,7 +7782,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::SignatureCreationTime(
                            1515791223.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.trust_signature(), Some((2, 120)));
@@ -8086,7 +7794,7 @@ fn subpacket_test_2() {
                            level: 2,
                            trust: 120,
                        },
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         // Note: our parser strips the trailing NUL.
@@ -8098,7 +7806,7 @@ fn subpacket_test_2() {
                        length: 23.into(),
                        critical: true,
                        value: SubpacketValue::RegularExpression(regex.to_vec()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
     }
 
@@ -8131,7 +7839,7 @@ fn subpacket_test_2() {
                        critical: false,
                        value: SubpacketValue::KeyExpirationTime(
                            63072000.into()),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let keyid = "CEAD 0621 0934 7957".parse().unwrap();
@@ -8141,7 +7849,7 @@ fn subpacket_test_2() {
                        length: 9.into(),
                        critical: false,
                        value: SubpacketValue::Issuer(keyid),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         let fp = "B59B8817F519DCE10AFD85E4CEAD062109347957".parse().unwrap();
@@ -8152,7 +7860,7 @@ fn subpacket_test_2() {
                        length: 22.into(),
                        critical: false,
                        value: SubpacketValue::IssuerFingerprint(fp),
-                       authenticated: false.into(),
+                       authenticated: false,
                    }));
 
         assert_eq!(sig.embedded_signatures().count(), 1);
@@ -8174,15 +7882,15 @@ fn subpacket_test_2() {
 }
 
 #[test]
-fn issuer_default_v4() -> Result<()> {
+fn issuer_default() -> Result<()> {
     use crate::types::Curve;
 
     let hash_algo = HashAlgorithm::SHA512;
+    let hash = hash_algo.context()?;
     let sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);
     let key: crate::packet::key::SecretKey =
         crate::packet::key::Key4::generate_ecc(true, Curve::Ed25519)?.into();
     let mut keypair = key.into_keypair()?;
-    let hash = hash_algo.context()?.for_signature(keypair.public().version());
 
     // no issuer or issuer_fingerprint present, use default
     let sig_ = sig.sign_hash(&mut keypair, hash.clone())?;
@@ -8192,7 +7900,7 @@ fn issuer_default_v4() -> Result<()> {
     assert_eq!(sig_.issuer_fingerprints().collect::<Vec<_>>(),
                vec![ &keypair.public().fingerprint() ]);
 
-    let fp = Fingerprint::from_bytes(4, b"bbbbbbbbbbbbbbbbbbbb")?;
+    let fp = Fingerprint::from_bytes(b"bbbbbbbbbbbbbbbbbbbb");
 
     // issuer subpacket present, do not override
     let mut sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);
@@ -8203,50 +7911,6 @@ fn issuer_default_v4() -> Result<()> {
     assert_eq!(sig_.issuers().collect::<Vec<_>>(),
                vec![ &fp.clone().into() ]);
     assert_eq!(sig_.issuer_fingerprints().count(), 0);
-
-    // issuer_fingerprint subpacket present, do not override
-    let mut sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);
-
-    sig = sig.set_issuer_fingerprint(fp.clone())?;
-    let sig_ = sig.clone().sign_hash(&mut keypair, hash.clone())?;
-
-    assert_eq!(sig_.issuer_fingerprints().collect::<Vec<_>>(),
-               vec![ &fp ]);
-    assert_eq!(sig_.issuers().count(), 0);
-    Ok(())
-}
-
-#[test]
-fn issuer_default_v6() -> Result<()> {
-    use crate::types::Curve;
-
-    let hash_algo = HashAlgorithm::SHA512;
-    let sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);
-    let key: crate::packet::key::SecretKey =
-        crate::packet::key::Key6::generate_ecc(true, Curve::Ed25519)?.into();
-    let mut keypair = key.into_keypair()?;
-    let hash = hash_algo.context()?.for_signature(keypair.public().version());
-
-    // no issuer or issuer_fingerprint present, use default
-    let sig_ = sig.sign_hash(&mut keypair, hash.clone())?;
-
-    assert_eq!(sig_.issuers().collect::<Vec<_>>(),
-               Vec::<&KeyID>::new());
-    assert_eq!(sig_.issuer_fingerprints().collect::<Vec<_>>(),
-               vec![ &keypair.public().fingerprint() ]);
-
-    let fp = Fingerprint::from_bytes(4, b"bbbbbbbbbbbbbbbbbbbb")?;
-
-    // issuer subpacket present, ignore, subpacket is not used with v6
-    let mut sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);
-
-    sig = sig.set_issuer(fp.clone().into())?;
-    let sig_ = sig.clone().sign_hash(&mut keypair, hash.clone())?;
-
-    assert_eq!(sig_.issuers().collect::<Vec<_>>(),
-               vec![ &fp.clone().into() ]);
-    assert_eq!(sig_.issuer_fingerprints().collect::<Vec<_>>(),
-               vec![ &keypair.public().fingerprint() ]);
 
     // issuer_fingerprint subpacket present, do not override
     let mut sig = signature::SignatureBuilder::new(crate::types::SignatureType::Binary);

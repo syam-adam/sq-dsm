@@ -12,6 +12,7 @@ use crate::vec_truncate;
 use crate::{Error, Result};
 
 use crate::crypto::SessionKey;
+use crate::crypto::hash::Digest;
 use crate::crypto::mem::Protected;
 use crate::crypto::mpi::{self, MPI};
 use crate::key;
@@ -19,44 +20,7 @@ use crate::packet::Key;
 use crate::types::{Curve, HashAlgorithm, PublicKeyAlgorithm, SymmetricAlgorithm};
 use crate::utils::{read_be_u64, write_be_u64};
 
-#[allow(unused_imports)]
 pub(crate) use crate::crypto::backend::ecdh::{encrypt, decrypt};
-
-/// Returns the default ECDH KDF hash function.
-pub(crate) fn default_ecdh_kdf_hash(curve: &Curve) -> HashAlgorithm {
-    match curve {
-        Curve::Cv25519 => HashAlgorithm::SHA256,
-        // From RFC6637:
-        Curve::NistP256 => HashAlgorithm::SHA256,
-        Curve::NistP384 => HashAlgorithm::SHA384,
-        Curve::NistP521 => HashAlgorithm::SHA512,
-        // Extrapolated from RFC6637:
-        Curve::BrainpoolP256 => HashAlgorithm::SHA256,
-        Curve::BrainpoolP384 => HashAlgorithm::SHA384,
-        Curve::BrainpoolP512 => HashAlgorithm::SHA512,
-        // Conservative default.
-        Curve::Ed25519 // Odd: Not an encryption algo.
-            | Curve::Unknown(_) => HashAlgorithm::SHA512,
-    }
-}
-
-/// Returns the default ECDH KEK cipher.
-pub(crate) fn default_ecdh_kek_cipher(curve: &Curve) -> SymmetricAlgorithm {
-    match curve {
-        Curve::Cv25519 => SymmetricAlgorithm::AES128,
-        // From RFC6637:
-        Curve::NistP256 => SymmetricAlgorithm::AES128,
-        Curve::NistP384 => SymmetricAlgorithm::AES192,
-        Curve::NistP521 => SymmetricAlgorithm::AES256,
-        // Extrapolated from RFC6637:
-        Curve::BrainpoolP256 => SymmetricAlgorithm::AES128,
-        Curve::BrainpoolP384 => SymmetricAlgorithm::AES192,
-        Curve::BrainpoolP512 => SymmetricAlgorithm::AES256,
-        // Conservative default.
-        Curve::Ed25519 // Odd: Not an encryption algo.
-            | Curve::Unknown(_) => SymmetricAlgorithm::AES256,
-    }
-}
 
 /// Wraps a session key.
 ///
@@ -68,11 +32,12 @@ pub(crate) fn default_ecdh_kek_cipher(curve: &Curve) -> SymmetricAlgorithm {
 /// `VB` is the ephemeral public key encoded appropriately as MPI
 /// (i.e. with the 0x40 prefix for X25519, or 0x04 for the NIST
 /// curves), `S` is the shared Diffie-Hellman secret.
-#[allow(non_snake_case, dead_code)]
-pub(crate) fn encrypt_wrap(recipient: &Key<key::PublicParts, key::SubordinateRole>,
-                           session_key: &SessionKey, VB: MPI,
-                           S: &Protected)
+#[allow(non_snake_case)]
+pub(crate) fn encrypt_wrap<R>(recipient: &Key<key::PublicParts, R>,
+                              session_key: &SessionKey, VB: MPI,
+                              S: &Protected)
     -> Result<mpi::Ciphertext>
+    where R: key::KeyRole
 {
     match recipient.mpis() {
         mpi::PublicKey::ECDH { ref curve, ref hash, ref sym,.. } => {
@@ -117,12 +82,11 @@ pub(crate) fn encrypt_wrap(recipient: &Key<key::PublicParts, key::SubordinateRol
 /// `recipient` is the message receiver's public key, `S` is the
 /// shared Diffie-Hellman secret used to encrypt `ciphertext`.
 #[allow(non_snake_case)]
-pub fn decrypt_unwrap(recipient: &Key<key::PublicParts,
-                                      key::UnspecifiedRole>,
-                      S: &Protected,
-                      ciphertext: &mpi::Ciphertext,
-                      _plaintext_len: Option<usize>)
-                      -> Result<SessionKey>
+pub fn decrypt_unwrap<R>(recipient: &Key<key::PublicParts, R>,
+                         S: &Protected,
+                         ciphertext: &mpi::Ciphertext)
+    -> Result<SessionKey>
+    where R: key::KeyRole
 {
     match (recipient.mpis(), ciphertext) {
         (mpi::PublicKey::ECDH { ref curve, ref hash, ref sym, ..},
@@ -137,7 +101,9 @@ pub fn decrypt_unwrap(recipient: &Key<key::PublicParts,
 
             // Compute m = AESKeyUnwrap( Z, C ) as per [RFC3394]
             let m = aes_key_unwrap(*sym, &Z, key)?;
-            let m = pkcs5_unpad(m)?;
+            let cipher = SymmetricAlgorithm::from(m[0]);
+            let m = pkcs5_unpad(m, 1 + cipher.key_size()? + 2)?;
+
             Ok(m.into())
         },
 
@@ -154,7 +120,7 @@ pub fn decrypt_unwrap(recipient: &Key<key::PublicParts,
 ///   [Section 7 of RFC 6637]: https://tools.ietf.org/html/rfc6637#section-7
 fn kdf(x: &Protected, obits: usize, hash: HashAlgorithm, param: &[u8])
            -> Result<Protected> {
-    let mut hash = hash.context()?.for_digest();
+    let mut hash = hash.context()?;
     if obits > hash.digest_size() {
         return Err(
             Error::InvalidArgument("Hash digest too short".into()).into());
@@ -175,7 +141,6 @@ fn kdf(x: &Protected, obits: usize, hash: HashAlgorithm, param: &[u8])
 /// See [Section 8 of RFC 6637].
 ///
 ///   [Section 8 of RFC 6637]: https://tools.ietf.org/html/rfc6637#section-8
-#[allow(dead_code)]
 fn pkcs5_pad(sk: Protected, target_len: usize) -> Result<Protected> {
     if sk.len() > target_len {
         return Err(Error::InvalidArgument(
@@ -198,25 +163,20 @@ fn pkcs5_pad(sk: Protected, target_len: usize) -> Result<Protected> {
 /// See [Section 8 of RFC 6637].
 ///
 ///   [Section 8 of RFC 6637]: https://tools.ietf.org/html/rfc6637#section-8
-fn pkcs5_unpad(sk: Protected) -> Result<Protected> {
+fn pkcs5_unpad(sk: Protected, target_len: usize) -> Result<Protected> {
     if sk.len() > 0xff {
         return Err(Error::InvalidArgument("message too large".into()).into());
     }
 
+    if sk.len() < target_len {
+        return Err(Error::InvalidArgument("message too small".into()).into());
+    }
+
     let mut buf: Vec<u8> = sk.expose_into_unprotected_vec();
-
     let mut good = true;
-    let mut target_len = 0;
-
-    let padding = buf[buf.len() - 1];
-    if padding == 0 || padding as usize > buf.len() {
-        // The padding can't be "0" or longer than the buffer.
-        good = false
-    } else {
-        target_len = buf.len() - padding as usize;
-        for &b in &buf[target_len..] {
-            good = b == padding && good;
-        }
+    let missing = (buf.len() - target_len) as u8;
+    for &b in &buf[target_len..] {
+        good = b == missing && good;
     }
 
     if good {
@@ -235,9 +195,11 @@ fn pkcs5_unpad(sk: Protected) -> Result<Protected> {
 /// See [RFC 3394].
 ///
 ///  [RFC 3394]: https://tools.ietf.org/html/rfc3394
-pub fn aes_key_wrap(algo: SymmetricAlgorithm, key: &Protected,
-                    plaintext: &Protected)
-                    -> Result<Vec<u8>> {
+fn aes_key_wrap(algo: SymmetricAlgorithm, key: &Protected,
+                plaintext: &Protected)
+                -> Result<Vec<u8>> {
+    use crate::SymmetricAlgorithm::*;
+
     if plaintext.len() % 8 != 0 {
         return Err(Error::InvalidArgument(
             "Plaintext must be a multiple of 8".into()).into());
@@ -247,9 +209,10 @@ pub fn aes_key_wrap(algo: SymmetricAlgorithm, key: &Protected,
         return Err(Error::InvalidArgument("Bad key size".into()).into());
     }
 
-    use crate::crypto::symmetric::BlockCipherMode;
-    use crate::crypto::backend::{Backend, interface::Symmetric};
-    let mut cipher = Backend::encryptor(algo, BlockCipherMode::ECB, key, None)?;
+    let mut cipher = match algo {
+        AES128 | AES192 | AES256 => algo.make_encrypt_ecb(key)?,
+        _ => return Err(Error::UnsupportedSymmetricAlgorithm(algo).into()),
+    };
 
     //   Inputs:  Plaintext, n 64-bit values {P1, P2, ..., Pn}, and
     //            Key, K (the KEK).
@@ -284,7 +247,7 @@ pub fn aes_key_wrap(algo: SymmetricAlgorithm, key: &Protected,
 
                 // A = MSB(64, B) ^ t where t = (n*j)+i
                 a = read_be_u64(&b[..8]) ^ ((n * j) + i + 1) as u64;
-                // Note that our i runs from 0 to n-1 instead of 1 to
+                // (Note that our i runs from 0 to n-1 instead of 1 to
                 // n, hence the index shift.
 
                 // R[i] = LSB(64, B)
@@ -307,9 +270,11 @@ pub fn aes_key_wrap(algo: SymmetricAlgorithm, key: &Protected,
 /// See [RFC 3394].
 ///
 ///  [RFC 3394]: https://tools.ietf.org/html/rfc3394
-pub fn aes_key_unwrap(algo: SymmetricAlgorithm, key: &Protected,
-                      ciphertext: &[u8])
-                      -> Result<Protected> {
+fn aes_key_unwrap(algo: SymmetricAlgorithm, key: &Protected,
+                  ciphertext: &[u8])
+                  -> Result<Protected> {
+    use crate::SymmetricAlgorithm::*;
+
     if ciphertext.len() % 8 != 0 {
         return Err(Error::InvalidArgument(
             "Ciphertext must be a multiple of 8".into()).into());
@@ -319,9 +284,10 @@ pub fn aes_key_unwrap(algo: SymmetricAlgorithm, key: &Protected,
         return Err(Error::InvalidArgument("Bad key size".into()).into());
     }
 
-    use crate::crypto::symmetric::BlockCipherMode;
-    use crate::crypto::backend::{Backend, interface::Symmetric};
-    let mut cipher = Backend::decryptor(algo, BlockCipherMode::ECB, key, None)?;
+    let mut cipher = match algo {
+        AES128 | AES192 | AES256 => algo.make_decrypt_ecb(key)?,
+        _ => return Err(Error::UnsupportedSymmetricAlgorithm(algo).into()),
+    };
 
     //   Inputs:  Ciphertext, (n+1) 64-bit values {C0, C1, ..., Cn}, and
     //            Key, K (the KEK).
@@ -352,7 +318,7 @@ pub fn aes_key_unwrap(algo: SymmetricAlgorithm, key: &Protected,
                 // B = AES-1(K, (A ^ t) | R[i]) where t = n*j+i
                 write_be_u64(&mut tmp[..8], a ^ ((n * j) + i + 1) as u64);
                 tmp[8..].copy_from_slice(&r[8 * i..8 * (i + 1)]);
-                // Note that our i runs from n-1 to 0 instead of n to
+                // (Note that our i runs from n-1 to 0 instead of n to
                 // 1, hence the index shift.
                 cipher.decrypt(&mut b, &tmp)?;
 
@@ -403,13 +369,10 @@ fn make_param<P, R>(recipient: &Key<P, R>,
     param.push(curve.oid().len() as u8);
     param.extend_from_slice(curve.oid());
     param.push(PublicKeyAlgorithm::ECDH.into());
-
-    // KDF parameters.
-    param.push(3); // Octet count of the following parameters.
-    param.push(1); // 1-octet value 0x01, reserved for future extensions.
+    param.push(3);
+    param.push(1);
     param.push((*hash).into());
     param.push((*sym).into());
-
     param.extend_from_slice(b"Anonymous Sender    ");
     param.extend_from_slice(fp.as_bytes());
     assert_eq!(param.len(),
@@ -432,20 +395,13 @@ mod tests {
     fn pkcs5_padding() {
         let v = pkcs5_pad(vec![0, 0, 0].into(), 8).unwrap();
         assert_eq!(&v, &Protected::from(&[0, 0, 0, 5, 5, 5, 5, 5][..]));
-        let v = pkcs5_unpad(v).unwrap();
+        let v = pkcs5_unpad(v, 3).unwrap();
         assert_eq!(&v, &Protected::from(&[0, 0, 0][..]));
 
         let v = pkcs5_pad(vec![].into(), 8).unwrap();
         assert_eq!(&v, &Protected::from(&[8, 8, 8, 8, 8, 8, 8, 8][..]));
-        let v = pkcs5_unpad(v).unwrap();
+        let v = pkcs5_unpad(v, 0).unwrap();
         assert_eq!(&v, &Protected::from(&[][..]));
-
-        // Invalid padding.
-        let v = Protected::from(&[0, 0, 100][..]);
-        assert!(pkcs5_unpad(v).is_err());
-
-        let v = Protected::from(&[1, 0][..]);
-        assert!(pkcs5_unpad(v).is_err());
     }
 
     #[test]
@@ -567,10 +523,8 @@ mod tests {
             const LAST: usize = 0;
 
             let s = s.as_ref();
-            assert_eq!(s[FIRST] & ! 0b1111_1000, 0,
-                       "bits 0, 1 and 2 of the first byte should be cleared");
-            assert_eq!(s[LAST] & 0b1100_0000, 0b0100_0000,
-                       "bits 7 should be cleared and bit 6 should be set in the last byte");
+            assert_eq!(s[FIRST] & ! 0b1111_1000, 0);
+            assert_eq!(s[LAST] & 0b1100_0000, 0b0100_0000);
         }
 
         for _ in 0..5 {

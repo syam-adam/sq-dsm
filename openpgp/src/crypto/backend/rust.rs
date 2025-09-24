@@ -1,61 +1,66 @@
 //! Implementation of Sequoia crypto API using pure Rust cryptographic
 //! libraries.
 
-use cipher::generic_array::{ArrayLength, GenericArray};
-
-use crate::{Error, Result};
+use crate::types::*;
 
 pub mod aead;
 pub mod asymmetric;
 pub mod ecdh;
 pub mod hash;
-pub mod kdf;
 pub mod symmetric;
 
-pub struct Backend(());
+/// Fills the given buffer with random data.
+///
+/// Fills the given buffer with random data produced by a
+/// cryptographically secure pseudorandom number generator (CSPRNG).
+/// The output may be used as session keys or to derive long-term
+/// cryptographic keys from.
+pub fn random<B: AsMut<[u8]>>(mut buf: B) {
+    use rand07::rngs::OsRng;
+    use rand07::RngCore;
 
-impl super::interface::Backend for Backend {
-    fn backend() -> String {
-        // XXX: can we include features and the version?
-        "RustCrypto".to_string()
-    }
-
-    fn random(buf: &mut [u8]) -> Result<()> {
-        use rand::rngs::OsRng;
-        use rand::RngCore;
-        OsRng.fill_bytes(buf);
-        Ok(())
-    }
+    OsRng.fill_bytes(buf.as_mut())
 }
 
-trait GenericArrayExt<T, N: ArrayLength<T>> {
-    const LEN: usize;
-
-    /// Like [`GenericArray::from_slice`], but fallible.
-    fn try_from_slice(slice: &[T]) -> Result<&GenericArray<T, N>> {
-        if slice.len() == Self::LEN {
-            Ok(GenericArray::from_slice(slice))
-        } else {
-            Err(Error::InvalidArgument(
-                format!("Invalid slice length, want {}, got {}",
-                        Self::LEN, slice.len())).into())
-        }
-    }
-
-    /// Like [`GenericArray::clone_from_slice`], but fallible.
-    fn try_clone_from_slice(slice: &[T]) -> Result<GenericArray<T, N>>
-        where T: Clone
-    {
-        if slice.len() == Self::LEN {
-            Ok(GenericArray::clone_from_slice(slice))
-        } else {
-            Err(Error::InvalidArgument(
-                format!("Invalid slice length, want {}, got {}",
-                        Self::LEN, slice.len())).into())
+impl PublicKeyAlgorithm {
+    pub(crate) fn is_supported_by_backend(&self) -> bool {
+        use PublicKeyAlgorithm::*;
+        #[allow(deprecated)]
+        match &self {
+            RSAEncryptSign | RSAEncrypt | RSASign | ECDH | EdDSA | ECDSA
+                => true,
+            DSA
+                => false,
+            ElGamalEncrypt | ElGamalEncryptSign | Private(_) | Unknown(_)
+                => false,
         }
     }
 }
 
-impl<T, N: ArrayLength<T>> GenericArrayExt<T, N> for GenericArray<T, N> {
-    const LEN: usize = N::USIZE;
+impl Curve {
+    pub(crate) fn is_supported_by_backend(&self) -> bool {
+        use self::Curve::*;
+        match &self {
+            NistP256
+                => true,
+            NistP384 | NistP521
+                => false,
+            Ed25519 | Cv25519
+                => true,
+            BrainpoolP256 | BrainpoolP512 | Unknown(_)
+                => false,
+        }
+    }
+}
+
+impl AEADAlgorithm {
+    pub(crate) fn is_supported_by_backend(&self) -> bool {
+        use self::AEADAlgorithm::*;
+        match &self {
+            EAX
+                => true,
+            OCB | Private(_) | Unknown(_)
+                => false,
+        }
+    }
 }

@@ -12,10 +12,7 @@ use xxhash_rust::xxh3::Xxh3;
 
 use crate::{
     Packet,
-    packet::{
-        Iter,
-        SEIP,
-    },
+    packet::Iter,
 };
 
 /// A packet's body holds either unprocessed bytes, processed bytes,
@@ -74,8 +71,8 @@ pub enum Body {
     ///     that we failed to process, say because we didn't support
     ///     the packet's version.
     ///
-    ///   - The packet is an encryption container ([`SEIP`]) and the
-    ///     body is encrypted.
+    ///   - The packet is an encryption container ([`SEIP`] or
+    ///     [`AED`]) and the body is encrypted.
     ///
     /// Note: if some of a packet's data is streamed, and the
     /// `PacketParser` is configured to buffer unread content, then
@@ -85,6 +82,7 @@ pub enum Body {
     ///   [`Literal`]: crate::packet::Literal
     ///   [`Unknown`]: crate::packet::Unknown
     ///   [`SEIP`]: crate::packet::SEIP
+    ///   [`AED`]: crate::packet::AED
     Unprocessed(Vec<u8>),
 
     /// Processed packed body.
@@ -132,6 +130,13 @@ pub struct Container {
 }
 
 assert_send_and_sync!(Container);
+
+impl std::ops::Deref for Container {
+    type Target = Body;
+    fn deref(&self) -> &Self::Target {
+        &self.body
+    }
+}
 
 impl PartialEq for Container {
     fn eq(&self, other: &Container) -> bool {
@@ -292,9 +297,13 @@ impl Container {
 
     /// Returns the hash for the empty body.
     fn empty_body_digest() -> u64 {
-        use std::sync::OnceLock;
-        static DIGEST: OnceLock<u64> = OnceLock::new();
-        *DIGEST.get_or_init(|| Container::make_body_hash().digest())
+        lazy_static::lazy_static!{
+            static ref DIGEST: u64 = {
+                Container::make_body_hash().digest()
+            };
+        }
+
+        *DIGEST
     }
 
     /// Creates a hash context for hashing the body.
@@ -314,8 +323,7 @@ impl Container {
         format!("{:08X}", self.body_digest)
     }
 
-    /// Converts an indentation level to whitespace.
-    #[cfg(test)]
+    // Converts an indentation level to whitespace.
     fn indent(depth: usize) -> &'static str {
         use std::cmp;
 
@@ -323,12 +331,11 @@ impl Container {
         &s[0..cmp::min(depth, s.len())]
     }
 
-    /// Pretty prints the container to stderr.
-    ///
-    /// This function is primarily intended for debugging purposes.
-    ///
-    /// `indent` is the number of spaces to indent the output.
-    #[cfg(test)]
+    // Pretty prints the container to stderr.
+    //
+    // This function is primarily intended for debugging purposes.
+    //
+    // `indent` is the number of spaces to indent the output.
     pub(crate) fn pretty_print(&self, indent: usize) {
         for (i, p) in self.children_ref().iter().enumerate() {
             eprintln!("{}{}: {:?}",
@@ -342,7 +349,7 @@ impl Container {
     }
 }
 
-macro_rules! impl_unprocessed_body_forwards {
+macro_rules! impl_body_forwards {
     ($typ:ident) => {
         /// This packet implements the unprocessed container
         /// interface.
@@ -387,45 +394,14 @@ macro_rules! impl_unprocessed_body_forwards {
     };
 }
 
-macro_rules! impl_processed_body_forwards {
-    ($typ:ident) => {
-        /// This packet implements the processed container
-        /// interface.
-        ///
-        /// Container packets like this one can contain either
-        /// unprocessed or processed, structured data.
-        impl $typ {
-            /// Returns a reference to the container.
-            pub fn container_ref(&self) -> &packet::Container {
-                &self.container
-            }
-
-            /// Returns a mutable reference to the container.
-            pub fn container_mut(&mut self) -> &mut packet::Container {
-                &mut self.container
-            }
-
-            /// Gets a reference to the this packet's body.
-            pub fn body(&self) -> &crate::packet::Body {
-                self.container_ref().body()
-            }
-
-            /// Sets the this packet's body.
-            pub fn set_body(&mut self, body: crate::packet::Body)
-                            -> crate::packet::Body {
-                self.container_mut().set_body(body)
-            }
-        }
-    };
-}
-
 impl Packet {
     pub(crate) // for packet_pile.rs
     fn container_ref(&self) -> Option<&Container> {
+        use std::ops::Deref;
         match self {
-            Packet::CompressedData(p) => Some(p.container_ref()),
-            Packet::SEIP(SEIP::V1(p)) => Some(p.container_ref()),
-            Packet::SEIP(SEIP::V2(p)) => Some(p.container_ref()),
+            Packet::CompressedData(p) => Some(p.deref()),
+            Packet::SEIP(p) => Some(p.deref()),
+            Packet::AED(p) => Some(p.deref()),
             Packet::Literal(p) => Some(p.container_ref()),
             Packet::Unknown(p) => Some(p.container_ref()),
             _ => None,
@@ -434,10 +410,11 @@ impl Packet {
 
     pub(crate) // for packet_pile.rs, packet_pile_parser.rs, parse.rs
     fn container_mut(&mut self) -> Option<&mut Container> {
+        use std::ops::DerefMut;
         match self {
-            Packet::CompressedData(p) => Some(p.container_mut()),
-            Packet::SEIP(SEIP::V1(p)) => Some(p.container_mut()),
-            Packet::SEIP(SEIP::V2(p)) => Some(p.container_mut()),
+            Packet::CompressedData(p) => Some(p.deref_mut()),
+            Packet::SEIP(p) => Some(p.deref_mut()),
+            Packet::AED(p) => Some(p.deref_mut()),
             Packet::Literal(p) => Some(p.container_mut()),
             Packet::Unknown(p) => Some(p.container_mut()),
             _ => None,
@@ -450,7 +427,7 @@ impl Packet {
         self.container_ref().and_then(|c| c.children())
     }
 
-    /// Returns an iterator over all the packet's descendants, in
+    /// Returns an iterator over all of the packet's descendants, in
     /// depth-first order.
     pub(crate) fn descendants(&self) -> Option<Iter> {
         self.container_ref().and_then(|c| c.descendants())
@@ -458,7 +435,6 @@ impl Packet {
 
     /// Retrieves the packet's unprocessed body.
     #[cfg(test)]
-    #[allow(dead_code)] // Not used if no compression feature is enabled.
     pub(crate) fn unprocessed_body(&self) -> Option<&[u8]> {
         self.container_ref().and_then(|c| match c.body() {
             Body::Unprocessed(bytes) => Some(&bytes[..]),

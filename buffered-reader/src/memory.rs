@@ -41,10 +41,10 @@ impl<'a> Memory<'a, ()> {
 }
 
 impl<'a, C: fmt::Debug + Sync + Send> Memory<'a, C> {
-    /// Like [`Self::new`], but sets a cookie.
+    /// Like `new()`, but sets a cookie.
     ///
-    /// The cookie can be retrieved using the [`BufferedReader::cookie_ref`] and
-    /// [`BufferedReader::cookie_mut`] methods, and set using the [`BufferedReader::cookie_set`] method.
+    /// The cookie can be retrieved using the `cookie_ref` and
+    /// `cookie_mut` methods, and set using the `cookie_set` method.
     pub fn with_cookie(buffer: &'a [u8], cookie: C) -> Self {
         Memory {
             buffer,
@@ -140,7 +140,8 @@ mod test {
     use super::*;
     #[test]
     fn buffered_reader_memory_test () {
-        let mut bio = Memory::new(crate::BUFFERED_READER_TEST_DATA);
+        let data : &[u8] = include_bytes!("buffered-reader-test.txt");
+        let mut bio = Memory::new(data);
 
         buffered_reader_test_data_check(&mut bio);
     }
@@ -150,7 +151,7 @@ mod test {
     fn buffer_test() {
         // Test vector.  A Memory returns all unconsumed
         // data.  So, use a relatively small buffer size.
-        let size = default_buf_size();
+        let size = DEFAULT_BUF_SIZE;
         let mut input = Vec::with_capacity(size);
         let mut v = 0u8;
         for _ in 0..size {
@@ -165,7 +166,7 @@ mod test {
         let mut reader = Memory::new(&input[..]);
 
         for i in 0..input.len() {
-            let data = reader.data(default_buf_size() + 1).unwrap().to_vec();
+            let data = reader.data(DEFAULT_BUF_SIZE + 1).unwrap().to_vec();
             assert!(!data.is_empty());
             assert_eq!(data, reader.buffer());
             // And, we may as well check to make sure we read the

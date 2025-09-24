@@ -27,18 +27,19 @@ fn main() -> openpgp::Result<()> {
             .context("Failed to read key")?;
         let mut n = 0;
 
-        for skb in tsk.keys()
+        for key in tsk.keys()
             .with_policy(p, None).alive().revoked(false).for_signing().secret()
+            .map(|ka| ka.key())
         {
             keys.push({
-                let mut key = skb.key().clone();
+                let mut key = key.clone();
                 if key.secret().is_encrypted() {
-                    let password = rpassword::prompt_password(format!(
-                        "Please enter password to decrypt {}/{}: ",
-                        tsk, key
-                    ))?;
+                    let password = rpassword::read_password_from_tty(
+                        Some(&format!("Please enter password to decrypt \
+                                       {}/{}: ",tsk, key)))?;
+                    let algo = key.pk_algo();
                     key.secret_mut()
-                        .decrypt_in_place(skb.key(), &password.into())
+                        .decrypt_in_place(algo, &password.into())
                         .context("decryption failed")?;
                 }
                 n += 1;
@@ -62,9 +63,9 @@ fn main() -> openpgp::Result<()> {
 
     // Now, create a signer that emits the signature(s).
     let mut signer =
-        Signer::new(message, keys.pop().context("No key for signing")?)?;
+        Signer::new(message, keys.pop().context("No key for signing")?);
     for s in keys {
-        signer = signer.add_signer(s)?;
+        signer = signer.add_signer(s);
     }
     let message = signer.build().context("Failed to create signer")?;
 

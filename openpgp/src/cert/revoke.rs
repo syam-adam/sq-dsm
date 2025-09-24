@@ -1,4 +1,5 @@
 use std::convert::TryFrom;
+use std::ops::Deref;
 use std::time;
 
 use crate::{
@@ -35,7 +36,7 @@ use crate::cert::prelude::*;
 /// and the key used to sign the revocation certificate comes from
 /// `R`.
 ///
-/// [designated revoker]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+/// [designated revoker]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
 ///
 /// # Examples
 ///
@@ -71,7 +72,7 @@ use crate::cert::prelude::*;
 ///     .build(&mut signer, &cert, None)?;
 ///
 /// // Merge it into the certificate.
-/// let cert = cert.insert_packets(sig.clone())?.0;
+/// let cert = cert.insert_packets(sig.clone())?;
 ///
 /// // Now it's revoked.
 /// assert_eq!(RevocationStatus::Revoked(vec![&sig]),
@@ -83,6 +84,7 @@ pub struct CertRevocationBuilder {
 }
 assert_send_and_sync!(CertRevocationBuilder);
 
+#[allow(clippy::new_without_default)]
 impl CertRevocationBuilder {
     /// Returns a new `CertRevocationBuilder`.
     ///
@@ -294,7 +296,7 @@ impl CertRevocationBuilder {
     /// # assert_eq!(sig.typ(), SignatureType::KeyRevocation);
     /// #
     /// # // Merge it into the certificate.
-    /// # let cert = cert.insert_packets(sig.clone())?.0;
+    /// # let cert = cert.insert_packets(sig.clone())?;
     /// #
     /// # // Now it's revoked.
     /// # assert_eq!(RevocationStatus::Revoked(vec![&sig]),
@@ -308,6 +310,14 @@ impl CertRevocationBuilder {
         self.builder
             .set_hash_algo(hash_algo.into().unwrap_or(HashAlgorithm::SHA512))
             .sign_direct_key(signer, cert.primary_key().key())
+    }
+}
+
+impl Deref for CertRevocationBuilder {
+    type Target = signature::SignatureBuilder;
+
+    fn deref(&self) -> &Self::Target {
+        &self.builder
     }
 }
 
@@ -348,7 +358,7 @@ impl TryFrom<signature::SignatureBuilder> for CertRevocationBuilder {
 /// of `A`, even if that subkey is not bound to `A`.  Semantically,
 /// such a revocation certificate is currently meaningless.
 ///
-/// [designated revoker]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+/// [designated revoker]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
 ///
 /// # Examples
 ///
@@ -382,7 +392,7 @@ impl TryFrom<signature::SignatureBuilder> for CertRevocationBuilder {
 ///     .build(&mut signer, &cert, subkey.key(), None)?;
 ///
 /// // Merge it into the certificate.
-/// let cert = cert.insert_packets(sig.clone())?.0;
+/// let cert = cert.insert_packets(sig.clone())?;
 ///
 /// // Now it's revoked.
 /// let subkey = cert.keys().subkeys().nth(0).unwrap();
@@ -403,6 +413,7 @@ pub struct SubkeyRevocationBuilder {
 }
 assert_send_and_sync!(SubkeyRevocationBuilder);
 
+#[allow(clippy::new_without_default)]
 impl SubkeyRevocationBuilder {
     /// Returns a new `SubkeyRevocationBuilder`.
     ///
@@ -604,7 +615,7 @@ impl SubkeyRevocationBuilder {
     /// # assert_eq!(sig.typ(), SignatureType::SubkeyRevocation);
     /// #
     /// # // Merge it into the certificate.
-    /// # let cert = cert.insert_packets(sig.clone())?.0;
+    /// # let cert = cert.insert_packets(sig.clone())?;
     /// #
     /// # // Now it's revoked.
     /// # assert_eq!(RevocationStatus::Revoked(vec![&sig]),
@@ -622,6 +633,14 @@ impl SubkeyRevocationBuilder {
             .set_hash_algo(hash_algo.into().unwrap_or(HashAlgorithm::SHA512));
 
         key.bind(signer, cert, self.builder)
+    }
+}
+
+impl Deref for SubkeyRevocationBuilder {
+    type Target = signature::SignatureBuilder;
+
+    fn deref(&self) -> &Self::Target {
+        &self.builder
     }
 }
 
@@ -664,7 +683,7 @@ impl TryFrom<signature::SignatureBuilder> for SubkeyRevocationBuilder {
 /// meaningless.
 ///
 /// [User ID]: crate::packet::UserID
-/// [designated revoker]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+/// [designated revoker]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
 ///
 /// # Examples
 ///
@@ -698,7 +717,7 @@ impl TryFrom<signature::SignatureBuilder> for SubkeyRevocationBuilder {
 ///     .build(&mut signer, &cert, ua.userid(), None)?;
 ///
 /// // Merge it into the certificate.
-/// let cert = cert.insert_packets(sig.clone())?.0;
+/// let cert = cert.insert_packets(sig.clone())?;
 ///
 /// // Now it's revoked.
 /// let ua = cert.userids().nth(0).unwrap();
@@ -719,6 +738,7 @@ pub struct UserIDRevocationBuilder {
 }
 assert_send_and_sync!(UserIDRevocationBuilder);
 
+#[allow(clippy::new_without_default)]
 impl UserIDRevocationBuilder {
     /// Returns a new `UserIDRevocationBuilder`.
     ///
@@ -927,7 +947,7 @@ impl UserIDRevocationBuilder {
     /// # assert_eq!(sig.typ(), SignatureType::CertificationRevocation);
     /// #
     /// # // Merge it into the certificate.
-    /// # let cert = cert.insert_packets(sig.clone())?.0;
+    /// # let cert = cert.insert_packets(sig.clone())?;
     /// #
     /// # // Now it's revoked.
     /// # assert_eq!(RevocationStatus::Revoked(vec![&sig]),
@@ -944,6 +964,14 @@ impl UserIDRevocationBuilder {
             .set_hash_algo(hash_algo.into().unwrap_or(HashAlgorithm::SHA512));
 
         userid.bind(signer, cert, self.builder)
+    }
+}
+
+impl Deref for UserIDRevocationBuilder {
+    type Target = signature::SignatureBuilder;
+
+    fn deref(&self) -> &Self::Target {
+        &self.builder
     }
 }
 
@@ -987,7 +1015,7 @@ impl TryFrom<signature::SignatureBuilder> for UserIDRevocationBuilder {
 /// meaningless.
 ///
 /// [User Attribute]: crate::packet::user_attribute
-/// [designated revoker]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.3.23
+/// [designated revoker]: https://tools.ietf.org/html/rfc4880#section-5.2.3.15
 ///
 /// # Examples
 ///
@@ -1028,7 +1056,7 @@ impl TryFrom<signature::SignatureBuilder> for UserIDRevocationBuilder {
 ///     .build(&mut signer, &cert, ua.user_attribute(), None)?;
 ///
 /// // Merge it into the certificate.
-/// let cert = cert.insert_packets(sig.clone())?.0;
+/// let cert = cert.insert_packets(sig.clone())?;
 ///
 /// // Now it's revoked.
 /// let ua = cert.user_attributes().nth(0).unwrap();
@@ -1049,6 +1077,7 @@ pub struct UserAttributeRevocationBuilder {
 }
 assert_send_and_sync!(UserAttributeRevocationBuilder);
 
+#[allow(clippy::new_without_default)]
 impl UserAttributeRevocationBuilder {
     /// Returns a new `UserAttributeRevocationBuilder`.
     ///
@@ -1263,7 +1292,7 @@ impl UserAttributeRevocationBuilder {
     /// # assert_eq!(sig.typ(), SignatureType::CertificationRevocation);
     /// #
     /// # // Merge it into the certificate.
-    /// # let cert = cert.insert_packets(sig.clone())?.0;
+    /// # let cert = cert.insert_packets(sig.clone())?;
     /// #
     /// # // Now it's revoked.
     /// # assert_eq!(RevocationStatus::Revoked(vec![&sig]),
@@ -1280,6 +1309,14 @@ impl UserAttributeRevocationBuilder {
             .set_hash_algo(hash_algo.into().unwrap_or(HashAlgorithm::SHA512));
 
         ua.bind(signer, cert, self.builder)
+    }
+}
+
+impl Deref for UserAttributeRevocationBuilder {
+    type Target = signature::SignatureBuilder;
+
+    fn deref(&self) -> &Self::Target {
+        &self.builder
     }
 }
 
@@ -1391,10 +1428,10 @@ mod tests {
         // Create and sign a revocation certificate.
         let mut signer = cert.primary_key().key().clone()
             .parts_into_secret()?.into_keypair()?;
-        let user_id = cert.userids().next().unwrap().userid();
+        let user_id = cert.userids().next().unwrap();
         let builder = SignatureBuilder::new(SignatureType::CertificationRevocation);
         let revocation_builder: UserIDRevocationBuilder = builder.try_into()?;
-        let sig = revocation_builder.build(&mut signer, &cert, user_id, None)?;
+        let sig = revocation_builder.build(&mut signer, &cert, &user_id, None)?;
         assert_eq!(sig.typ(), SignatureType::CertificationRevocation);
         Ok(())
     }
@@ -1434,11 +1471,10 @@ mod tests {
         // Create and sign a revocation certificate.
         let mut signer = cert.primary_key().key().clone()
             .parts_into_secret()?.into_keypair()?;
-        let user_attribute =
-            cert.user_attributes().next().unwrap().user_attribute();
+        let user_attribute = cert.user_attributes().next().unwrap();
         let builder = SignatureBuilder::new(SignatureType::CertificationRevocation);
         let revocation_builder: UserAttributeRevocationBuilder = builder.try_into()?;
-        let sig = revocation_builder.build(&mut signer, &cert, user_attribute, None)?;
+        let sig = revocation_builder.build(&mut signer, &cert, &user_attribute, None)?;
         assert_eq!(sig.typ(), SignatureType::CertificationRevocation);
         Ok(())
     }

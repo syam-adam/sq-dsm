@@ -1,7 +1,7 @@
 //! IPC mechanisms for Sequoia.
 //!
 //! This crate implements IPC mechanisms to communicate with Sequoia
-//! services.
+//! and GnuPG background services.
 //!
 //! # Rationale
 //!
@@ -37,20 +37,17 @@
 #![warn(missing_docs)]
 
 use std::fs;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, TcpListener};
-use std::path::Path;
 use std::path::PathBuf;
-use std::thread::JoinHandle;
 
 use anyhow::anyhow;
-use anyhow::Context as _;
-
 use fs2::FileExt;
+
+use tokio_util::compat::Compat;
 
 use capnp_rpc::{RpcSystem, twoparty};
 use capnp_rpc::rpc_twoparty_capnp::Side;
-pub use capnp_rpc as capnp_rpc;
 
 #[cfg(unix)]
 use std::os::unix::{io::{IntoRawFd, FromRawFd}, fs::OpenOptionsExt};
@@ -62,7 +59,11 @@ use winapi::um::winsock2;
 use std::process::{Command, Stdio};
 use std::thread;
 
+use sequoia_openpgp as openpgp;
+
 #[macro_use] mod macros;
+pub mod assuan;
+pub mod gnupg;
 pub mod keybox;
 mod keygrip;
 pub use self::keygrip::Keygrip;
@@ -73,11 +74,26 @@ pub use crate::core::{Config, Context, IPCPolicy};
 #[cfg(test)]
 mod tests;
 
+macro_rules! platform {
+    { unix => { $($unix:tt)* }, windows => { $($windows:tt)* } } => {
+        if cfg!(unix) {
+            #[cfg(unix)] { $($unix)* }
+            #[cfg(not(unix))] { unreachable!() }
+        } else if cfg!(windows) {
+            #[cfg(windows)] { $($windows)* }
+            #[cfg(not(windows))] { unreachable!() }
+        } else {
+            #[cfg(not(any(unix, windows)))] compile_error!("Unsupported platform");
+            unreachable!()
+        }
+    }
+}
+
 /// Servers need to implement this trait.
 pub trait Handler {
     /// Called on every connection.
     fn handle(&self,
-              network: capnp_rpc::twoparty::VatNetwork<tokio_util::compat::Compat<tokio::net::tcp::OwnedReadHalf>>)
+              network: twoparty::VatNetwork<Compat<tokio::net::tcp::OwnedReadHalf>>)
               -> RpcSystem<Side>;
 }
 
@@ -96,17 +112,8 @@ pub struct Descriptor {
     factory: HandlerFactory,
 }
 
-impl std::fmt::Debug for Descriptor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Descriptor")
-            .field("rendezvous", &self.rendezvous)
-            .field("executable", &self.executable)
-            .finish()
-    }
-}
-
 impl Descriptor {
-    /// Create a descriptor given its rendez-vous point, the path to
+    /// Create a descriptor given its rendezvous point, the path to
     /// the servers executable file, and a handler factory.
     pub fn new(ctx: &core::Context, rendezvous: PathBuf,
                executable: PathBuf, factory: HandlerFactory)
@@ -122,11 +129,6 @@ impl Descriptor {
     /// Returns the context.
     pub fn context(&self) -> &core::Context {
         &self.ctx
-    }
-
-    /// Returns the rendez-vous point.
-    pub fn rendez_vous(&self) -> &Path {
-        &self.rendezvous
     }
 
     /// Connects to a descriptor, starting the server if necessary.
@@ -156,7 +158,6 @@ impl Descriptor {
             cookie.send(&mut s)?;
 
             /* Tokioize.  */
-            s.set_nonblocking(true)?;
             let stream = tokio::net::TcpStream::from_std(s)?;
             stream.set_nodelay(true)?;
 
@@ -174,10 +175,20 @@ impl Descriptor {
         };
 
         fs::create_dir_all(self.ctx.home())?;
+        let mut file = fs::OpenOptions::new();
+        file
+            .read(true)
+            .write(true)
+            .create(true);
+        #[cfg(unix)]
+        file.mode(0o600);
+        let mut file = file.open(&self.rendezvous)?;
+        file.lock_exclusive()?;
 
-        let mut file = CookieFile::open(&self.rendezvous)?;
+        let mut c = vec![];
+        file.read_to_end(&mut c)?;
 
-        if let Some((cookie, rest)) = file.read()? {
+        if let Some((cookie, rest)) = Cookie::extract(c) {
             let stream = String::from_utf8(rest).map_err(drop)
                 .and_then(|rest| rest.parse::<SocketAddr>().map_err(drop))
                 .and_then(|addr| TcpStream::connect(addr).map_err(drop));
@@ -186,14 +197,14 @@ impl Descriptor {
                 do_connect(cookie, s)
             } else {
                 /* Failed to connect.  Invalidate the cookie and try again.  */
-                file.clear()?;
+                file.set_len(0)?;
                 drop(file);
                 self.connect()
             }
         } else {
             let cookie = Cookie::new();
 
-            let (addr, external, _join_handle) = match policy {
+            let (addr, external) = match policy {
                 core::IPCPolicy::Internal => self.start(false)?,
                 core::IPCPolicy::External => self.start(true)?,
                 core::IPCPolicy::Robust => self.start(true)
@@ -205,7 +216,9 @@ impl Descriptor {
 
             if external {
                 /* Write connection information to file.  */
-                file.write(&cookie, format!("{}", addr).as_bytes())?;
+                file.set_len(0)?;
+                file.write_all(&cookie.0)?;
+                write!(file, "{}", addr)?;
             }
             drop(file);
 
@@ -215,21 +228,18 @@ impl Descriptor {
 
     /// Start the service, either as an external process or as a
     /// thread.
-    fn start(&self, external: bool)
-        -> Result<(SocketAddr, bool, Option<JoinHandle<Result<()>>>)>
-    {
+    fn start(&self, external: bool) -> Result<(SocketAddr, bool)> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let addr = listener.local_addr()?;
 
         /* Start the server, connect to it, and send the cookie.  */
-        let join_handle: Option<JoinHandle<Result<()>>> = if external {
+        if external {
             self.fork(listener)?;
-            None
         } else {
-            Some(self.spawn(listener)?)
-        };
+            self.spawn(listener)?;
+        }
 
-        Ok((addr, external, join_handle))
+        Ok((addr, external))
     }
 
     fn fork(&self, listener: TcpListener) -> Result<()> {
@@ -241,7 +251,6 @@ impl Descriptor {
             .arg(self.ctx.lib())
             .arg("--ephemeral")
             .arg(self.ctx.ephemeral().to_string())
-            .arg("--socket").arg("0")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -275,64 +284,16 @@ impl Descriptor {
         Ok(())
     }
 
-    fn spawn(&self, l: TcpListener) -> Result<JoinHandle<Result<()>>> {
+    fn spawn(&self, l: TcpListener) -> Result<()> {
         let descriptor = self.clone();
-        let join_handle = thread::spawn(move || -> Result<()> {
+        thread::spawn(move || -> Result<()> {
             Server::new(descriptor)
-                .with_context(|| "Failed to spawn server".to_string())?
-                .serve_listener(l)
-                .with_context(|| "Failed to spawn server".to_string())?;
+               .expect("Failed to spawn server") // XXX
+               .serve_listener(l)
+               .expect("Failed to spawn server"); // XXX
             Ok(())
         });
-
-        Ok(join_handle)
-    }
-
-    /// Turn this process into a server.
-    ///
-    /// This checks if a server is running.  If not, it turns the
-    /// current process into a server.
-    ///
-    /// This function is for servers trying to start themselves.
-    /// Normally, servers are started by clients on demand.  A client
-    /// should never call this function.
-    pub fn bootstrap(&mut self) -> Result<Option<JoinHandle<Result<()>>>> {
-        let mut file = CookieFile::open(&self.rendezvous)?;
-
-        // Try to connect to the server.  If it is already running,
-        // we're done.
-        if let Some((cookie, rest)) = file.read()? {
-            if let Ok(addr) = String::from_utf8(rest).map_err(drop)
-                .and_then(|rest| rest.parse::<SocketAddr>().map_err(drop))
-            {
-                let stream = TcpStream::connect(&addr).map_err(drop);
-
-                if let Ok(mut s) = stream {
-                    if let Ok(()) = cookie.send(&mut s) {
-                        // There's already a server running.
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-
-        // Create a new cookie.
-        let cookie = Cookie::new();
-
-        // Start an *internal* server.
-        let (addr, _external, join_handle) = self.start(false)?;
-        let join_handle = join_handle
-            .expect("start returns the join handle for in-process servers");
-
-        file.write(&cookie, format!("{}", addr).as_bytes())?;
-        // Release the lock.
-        drop(file);
-
-        // Send the cookie to the server.
-        let mut s = TcpStream::connect(addr)?;
-        cookie.send(&mut s)?;
-
-        Ok(Some(join_handle))
+        Ok(())
     }
 }
 
@@ -388,7 +349,7 @@ impl Server {
     /// of the Windows Sockets API `SOCKET` value.
     pub fn serve(&mut self) -> Result<()> {
         let listener = platform! {
-            unix => unsafe { TcpListener::from_raw_fd(0) },
+            unix => { unsafe { TcpListener::from_raw_fd(0) } },
             windows => {
                 let socket = std::env::var("SOCKET")?.parse()?;
                 unsafe { TcpListener::from_raw_socket(socket) }
@@ -398,32 +359,9 @@ impl Server {
     }
 
     fn serve_listener(&mut self, l: TcpListener) -> Result<()> {
-        // The protocol is:
-        //
-        // - The first client exclusively locks the cookie file.
-        //
-        // - The client allocates a TCP socket, and generates a
-        //   cookie.
-        //
-        // - The client starts the server, and passes the listener to
-        //   it.
-        //
-        // - The client connects to the server via the socket, and
-        //   sends it the cookie.
-        //
-        // - The client drops the connection and unlocks the cookie
-        //   file thereby allowing other clients to connect.
-        //
-        // - The server waits for the cookie on the first connection.
-        //
-        // - The server starts serving clients.
-        //
-        // Note: this initial connection cannot (currently) be used
-        // for executing RPCs; the server closes it immediately after
-        // receiving the cookie.
-
-        // The first client sends us the cookie.
+        /* The first client tells us our cookie.  */
         let cookie = {
+            /* XXX: It'd be nice to recycle this connection.  */
             let mut i = l.accept()?;
             Cookie::receive(&mut i.0)?
         };
@@ -433,19 +371,15 @@ impl Server {
         let handler = (self.descriptor.factory)(self.descriptor.clone(), &local)?;
 
         let server = async move {
-            l.set_nonblocking(true)?;
             let socket = tokio::net::TcpListener::from_std(l).unwrap();
 
             loop {
                 let (mut socket, _) = socket.accept().await?;
 
                 let _ = socket.set_nodelay(true);
-                let received_cookie = match Cookie::receive_async(&mut socket).await {
-                    Err(_) => continue, // XXX: Log the error?
-                    Ok(received_cookie) => received_cookie,
-                };
+                let received_cookie = Cookie::receive_async(&mut socket).await?;
                 if received_cookie != cookie {
-                    continue;   // XXX: Log the error?
+                    return Err(anyhow::anyhow!("Bad cookie"));
                 }
 
                 let (reader, writer) = socket.into_split();
@@ -541,83 +475,12 @@ impl PartialEq for Cookie {
     }
 }
 
-/// Wraps a cookie file.
-struct CookieFile {
-    path: PathBuf,
-    file: fs::File,
-}
-
-impl CookieFile {
-    /// Opens the specified cookie.
-    ///
-    /// The file is opened, and immediately locked.  (The lock is
-    /// dropped when the file is closed.)
-    fn open(path: &Path) -> Result<CookieFile> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Creating {}", parent.display()))?;
-        }
-
-        let mut file = fs::OpenOptions::new();
-        file
-            .read(true)
-            .write(true)
-            .create(true);
-        #[cfg(unix)]
-        file.mode(0o600);
-        let file = file.open(path)
-            .with_context(|| format!("Opening {}", path.display()))?;
-        file.lock_exclusive()
-            .with_context(|| format!("Locking {}", path.display()))?;
-
-        Ok(Self {
-            path: path.to_path_buf(),
-            file,
-        })
-    }
-
-    /// Reads the cookie file.
-    ///
-    /// If the file contains a cookie, returns it and any other data.
-    ///
-    /// Returns `None` if the file does not contain a cookie.
-    fn read(&mut self) -> Result<Option<(Cookie, Vec<u8>)>> {
-        let mut content = vec![];
-        self.file.read_to_end(&mut content)
-            .with_context(|| format!("Opening {}", self.path.display()))?;
-        Ok(Cookie::extract(content))
-    }
-
-    /// Writes the specified cookie to the cookie file followed by the
-    /// specified data.
-    ///
-    /// The contents of the cookie file are replaced.
-    fn write(&mut self, cookie: &Cookie, data: &[u8]) -> Result<()> {
-        self.file.rewind()
-            .with_context(|| format!("Rewinding {}", self.path.display()))?;
-        self.file.set_len(0)
-            .with_context(|| format!("Truncating {}", self.path.display()))?;
-        self.file.write_all(&cookie.0)
-            .with_context(|| format!("Updating {}", self.path.display()))?;
-        self.file.write_all(data)
-            .with_context(|| format!("Updating {}", self.path.display()))?;
-
-        Ok(())
-    }
-
-    /// Clears the cookie file.
-    ///
-    /// The cookie file is truncated.
-    fn clear(&mut self) -> Result<()> {
-        self.file.set_len(0)
-            .with_context(|| format!("Truncating {}", self.path.display()))?;
-        Ok(())
-    }
-}
-
 #[derive(thiserror::Error, Debug)]
 /// Errors returned from the network routines.
 pub enum Error {
+    /// Handshake failed.
+    #[error("Handshake failed: {0}")]
+    HandshakeFailed(String),
     /// Connection closed unexpectedly.
     #[error("Connection closed unexpectedly.")]
     ConnectionClosed(Vec<u8>),
@@ -653,6 +516,7 @@ fn wsa_cleanup() {
     }
 }
 
+#[allow(clippy::let_and_return)]
 pub(crate) fn new_background_command<S>(program: S) -> Command
 where
     S: AsRef<std::ffi::OsStr>,

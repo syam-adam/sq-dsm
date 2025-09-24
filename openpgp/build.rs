@@ -6,21 +6,8 @@ use std::process::exit;
 
 fn main() {
     crypto_backends_sanity_check();
-    include_openssl_conf();
-    lalrpop::Configuration::new().use_cargo_dir_conventions().process().unwrap();
+    lalrpop::process_root().unwrap();
     include_test_data().unwrap();
-}
-
-/// Optionally include configuration passed from openssl-sys build
-/// script.  This configuration is then exposed as a set of `osslconf`
-/// parameters and is used by OpenSSL backend to enable or disable
-/// algorithms available by the current environment.
-fn include_openssl_conf() {
-    if let Ok(vars) = env::var("DEP_OPENSSL_CONF") {
-        for var in vars.split(',') {
-            println!("cargo:rustc-cfg=osslconf=\"{}\"", var);
-        }
-    }
 }
 
 /// Builds the index of the test data for use with the `::tests`
@@ -63,26 +50,13 @@ fn crypto_backends_sanity_check() {
     }
 
     let backends = vec![
-        (cfg!(all(feature = "crypto-nettle",
-                  not(all(feature = "__implicit-crypto-backend-for-tests",
-                          any(feature = "crypto-openssl",
-                              feature = "crypto-botan",
-                              feature = "crypto-botan2",
-                              feature = "crypto-fuzzing",
-                              feature = "crypto-rust"))))),
+        (cfg!(feature = "crypto-nettle"),
          Backend {
              name: "Nettle",
              production_ready: true,
              constant_time: true,
          }),
-        (cfg!(all(feature = "crypto-cng",
-                  not(all(feature = "__implicit-crypto-backend-for-tests",
-                          any(feature = "crypto-nettle",
-                              feature = "crypto-openssl",
-                              feature = "crypto-botan",
-                              feature = "crypto-botan2",
-                              feature = "crypto-fuzzing",
-                              feature = "crypto-rust"))))),
+        (cfg!(feature = "crypto-cng"),
          Backend {
              name: "Windows CNG",
              production_ready: true,
@@ -91,30 +65,6 @@ fn crypto_backends_sanity_check() {
         (cfg!(feature = "crypto-rust"),
          Backend {
              name: "RustCrypto",
-             production_ready: false,
-             constant_time: false,
-         }),
-        (cfg!(feature = "crypto-openssl"),
-         Backend {
-             name: "OpenSSL",
-             production_ready: true,
-             constant_time: true,
-         }),
-        (cfg!(feature = "crypto-botan"),
-         Backend {
-             name: "Botan",
-             production_ready: true,
-             constant_time: true,
-         }),
-        (cfg!(feature = "crypto-botan2"),
-         Backend {
-             name: "Botan",
-             production_ready: true,
-             constant_time: true,
-         }),
-        (cfg!(feature = "crypto-fuzzing"),
-         Backend {
-             name: "Fuzzing",
              production_ready: false,
              constant_time: false,
          }),
