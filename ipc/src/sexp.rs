@@ -977,4 +977,32 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn parse_octal() {
+        for (input, expected) in [
+            (br#""\000""#, Some(0)),
+            (br#""\377""#, Some(255)),
+             // \400 is not valid.
+            (br#""\400""#, None)
+        ] {
+            eprintln!("Parsing sexp {:?} should yield {:?}",
+                      String::from_utf8_lossy(&input[..]), expected);
+
+            let parsed = Sexp::from_bytes(input);
+            eprintln!("  Got: {:?}", parsed);
+
+            match (&parsed, expected) {
+                (Ok(Sexp::String(s)), Some(v)) => {
+                    assert_eq!(s.to_bytes()[0], v);
+                },
+                (Err(_), None) => {
+                    // Expected error.
+                },
+                _ => {
+                    panic!("Got {:?}", parsed);
+                }
+            }
+        }
+    }
 }

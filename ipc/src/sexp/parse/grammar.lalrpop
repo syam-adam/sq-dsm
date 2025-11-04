@@ -229,8 +229,7 @@ QuotedChar: Option<u8> = {
     //
     // \ooo   -- character with octal value ooo (all three
     //           digits MUST be present)
-    <a:OctalDigit> <b:OctalDigit> <c:OctalDigit> => {
-        // XXX: If a > 3, this overflows.
+    <a:OctalFirstDigit> <b:OctalDigit> <c:OctalDigit> => {
         Some((a << 6) | (b << 3) | c)
     },
 
@@ -321,6 +320,15 @@ OctalDigit: u8 = {
     N_5 => 5,
     N_6 => 6,
     N_7 => 7,
+}
+
+// An OctalFirstDigit is the lower half of an OctalDigit.  We use this
+// to avoid overflows when parsing the first digit in a \ooo value.
+OctalFirstDigit: u8 = {
+    N_0 => 0,
+    N_1 => 1,
+    N_2 => 2,
+    N_3 => 3,
 }
 
 HexDigit: u8 = {
