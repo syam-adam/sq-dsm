@@ -556,6 +556,7 @@ impl PacketDumper {
                                 writeln!(output,
                                          "{}    Unknown image({}): {} bytes", i,
                                          n, data.len())?,
+                            _ => writeln!(output, "Unknown image")?,
                         },
                         Ok(Subpacket::Unknown(n, data)) =>
                             writeln!(output,
@@ -565,6 +566,7 @@ impl PacketDumper {
                             writeln!(output,
                                      "{}    Invalid subpacket encoding: {}", i,
                                      e)?,
+                        _ => writeln!(output, "Unknown subpacket")?,
                     }
                 }
             },

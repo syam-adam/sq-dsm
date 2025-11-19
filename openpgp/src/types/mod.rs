@@ -43,8 +43,6 @@
 //! [`Timestamp::round_down`]: Timestamp::round_down()
 
 use std::fmt;
-use std::str::FromStr;
-use std::result;
 
 #[cfg(test)]
 use quickcheck::{Arbitrary, Gen};

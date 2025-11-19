@@ -13,7 +13,6 @@ use crate::openpgp::{
 use crate::openpgp::types::{
     CompressionAlgorithm,
 };
-use crate::openpgp::cert::prelude::*;
 use crate::openpgp::crypto;
 use crate::openpgp::{Cert, KeyID, Result};
 use crate::openpgp::packet::prelude::*;
@@ -151,19 +150,18 @@ pub fn encrypt(opts: EncryptOpts) -> Result<()> {
     for cert in opts.recipients.iter() {
         let mut count = 0;
         for key in cert.keys().with_policy(opts.policy, None).alive().revoked(false)
-            .key_flags(&opts.mode).supported().map(|ka| ka.key())
+            .key_flags(&opts.mode).supported().map(|ka| ka)
         {
             recipient_subkeys.push(key.into());
             count += 1;
         }
         if count == 0 {
             let mut expired_keys = Vec::new();
-            for ka in cert.keys().with_policy(opts.policy, None).revoked(false)
+            for key in cert.keys().with_policy(opts.policy, None).revoked(false)
                 .key_flags(&opts.mode).supported()
             {
-                let key = ka.key();
                 expired_keys.push(
-                    (ka.binding_signature().key_expiration_time(key)
+                    (key.binding_signature().key_expiration_time(key.key())
                          .expect("Key must have an expiration time"),
                      key));
             }
@@ -171,7 +169,7 @@ pub fn encrypt(opts: EncryptOpts) -> Result<()> {
 
             if let Some((expiration_time, key)) = expired_keys.last() {
                 if opts.use_expired_subkey {
-                    recipient_subkeys.push((*key).into());
+                    recipient_subkeys.push(key.clone().into());
                 } else {
                     use chrono::{DateTime, offset::Utc};
                     return Err(anyhow::anyhow!(
@@ -302,7 +300,13 @@ impl<'a> VHelper<'a> {
                     (ka.key().keyid(), sig.level()),
                 Err(MalformedSignature { error, .. }) => {
                     eprintln!("Malformed signature:");
-                    print_error_chain(error);
+                    print_error_chain(&error);
+                    self.broken_signatures += 1;
+                    continue;
+                },
+                Err(UnknownSignature { sig, .. }) => {
+                    eprintln!("Malformed signature:");
+                    print_error_chain(sig.error());
                     self.broken_signatures += 1;
                     continue;
                 },
@@ -341,6 +345,11 @@ impl<'a> VHelper<'a> {
                     eprintln!("Error verifying {} from {}:",
                               what, issuer);
                     print_error_chain(error);
+                    self.bad_checksums += 1;
+                    continue;
+                },
+                Err(_) => {
+                    eprintln!("Unknown error");
                     self.bad_checksums += 1;
                     continue;
                 }

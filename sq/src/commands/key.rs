@@ -134,7 +134,7 @@ fn generate(config: Config, m: &ArgMatches) -> Result<()> {
                                 process::exit(1);
                             }
                             // Check for duplicate keys
-                            if !seen_keys.insert(key.clone()) {
+                            if !seen_keys.insert(key) {
                                 eprintln!("Error: Duplicate key '{}' found in given custom metadata.", key);
                                 process::exit(1);
                             }
@@ -538,7 +538,7 @@ fn dsm_import(config: Config, m: &ArgMatches) -> Result<()> {
                             process::exit(1);
                         }
                         // Check for duplicate keys
-                        if !seen_keys.insert(key.clone()) {
+                        if !seen_keys.insert(key) {
                             eprintln!("Error: Duplicate key '{}' found in given custom metadata.", key);
                             process::exit(1);
                         }
@@ -721,7 +721,7 @@ fn adopt(config: Config, m: &ArgMatches) -> Result<()> {
             })?;
         }
 
-        let mut sig = builder.sign_subkey_binding(&mut pk_signer, pk, &key)?;
+        let sig = builder.sign_subkey_binding(&mut pk_signer, pk, &key)?;
 
         // Verify it.
         assert!(sig.verify_subkey_binding(pk_signer.public(), pk, &key)
