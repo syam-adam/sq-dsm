@@ -12,6 +12,7 @@
    - Key4::import_public_ed448
    - Key4::import_public_x25519
    - Key4::import_public_x448
+   - CipherSuite::Cv448
 
 * Changes in 2.1.0
 ** Notable fixes

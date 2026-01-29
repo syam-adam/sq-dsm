@@ -67,6 +67,8 @@ pub use key::{
 pub enum CipherSuite {
     /// EdDSA and ECDH over Curve25519 with SHA512 and AES256
     Cv25519,
+    /// EdDSA and ECDH over Curve448 with SHA512 and AES256
+    Cv448,
     /// 3072 bit RSA with SHA512 and AES256
     RSA3k,
     /// EdDSA and ECDH over NIST P-256 with SHA256 and AES256
@@ -96,7 +98,7 @@ impl CipherSuite {
     pub fn variants() -> impl Iterator<Item=CipherSuite> {
         use CipherSuite::*;
 
-        [ Cv25519, RSA3k, P256, P384, P521, RSA2k, RSA4k ]
+        [ Cv25519, Cv448, RSA3k, P256, P384, P521, RSA2k, RSA4k ]
             .into_iter()
     }
 
@@ -131,6 +133,10 @@ impl CipherSuite {
                 check_curve!(Curve::Ed25519);
                 check_pk!(PublicKeyAlgorithm::ECDH);
                 check_curve!(Curve::Cv25519);
+            },
+            Cv448 => {
+                check_pk!(PublicKeyAlgorithm::X448);
+                check_pk!(PublicKeyAlgorithm::Ed448);
             },
             RSA2k | RSA3k | RSA4k => {
                 check_pk!(PublicKeyAlgorithm::RSAEncryptSign);
@@ -177,6 +183,25 @@ impl CipherSuite {
                 Key4::generate_rsa(3072),
             CipherSuite::RSA4k =>
                 Key4::generate_rsa(4096),
+            CipherSuite::Cv448 => {
+                let flags = flags.as_ref();
+                let sign = flags.for_certification() || flags.for_signing()
+                    || flags.for_authentication();
+                let encrypt = flags.for_transport_encryption()
+                    || flags.for_storage_encryption();
+                match (sign, encrypt) {
+                    (true, false) => Key4::generate_ed448(),
+                    (false, true) => Key4::generate_x448(),
+                    (true, true) =>
+                        Err(Error::InvalidOperation(
+                            "Can't use key for encryption and signing".into())
+                            .into()),
+                    (false, false) =>
+                        Err(Error::InvalidOperation(
+                            "No key flags set".into())
+                            .into()),
+                }
+            }
             CipherSuite::Cv25519 | CipherSuite::P256 |
             CipherSuite::P384 | CipherSuite::P521 => {
                 let flags = flags.as_ref();
@@ -245,6 +270,18 @@ impl CipherSuite {
                 Key6::generate_rsa(3072),
             CipherSuite::RSA4k =>
                 Key6::generate_rsa(4096),
+            CipherSuite::Cv448 => match (sign, encrypt) {
+                (true, false) => Key6::generate_ed448(),
+                (false, true) => Key6::generate_x448(),
+                (true, true) =>
+                    Err(Error::InvalidOperation(
+                        "Can't use key for encryption and signing".into())
+                        .into()),
+                (false, false) =>
+                    Err(Error::InvalidOperation(
+                        "No key flags set".into())
+                        .into()),
+            },
             CipherSuite::P256 | CipherSuite::P384 | CipherSuite::P521 => {
                 let curve = match self {
                     CipherSuite::Cv25519 if sign => Curve::Ed25519,
@@ -2287,6 +2324,15 @@ mod tests {
             (CipherSuite::Cv25519,
              Profile::RFC9580,
              &[ PublicKeyAlgorithm::Ed25519, PublicKeyAlgorithm::X25519 ],
+             &[]),
+
+            (CipherSuite::Cv448,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::Ed448, PublicKeyAlgorithm::X448 ],
+             &[]),
+            (CipherSuite::Cv448,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::Ed448, PublicKeyAlgorithm::X448 ],
              &[]),
 
             (CipherSuite::RSA2k,
