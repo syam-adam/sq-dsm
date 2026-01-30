@@ -948,33 +948,6 @@ mod tests {
     }
 
     #[test]
-    fn signature_roundtrip() {
-        use crate::types::{Curve::*, SignatureType};
-
-        let keys = vec![NistP256, NistP384, NistP521].into_iter()
-            .filter_map(|cv| {
-                Key6::generate_ecc(true, cv).ok()
-            }).chain(vec![1024, 2048, 3072, 4096].into_iter().filter_map(|b| {
-                Key6::generate_rsa(b).ok()
-            }));
-
-        for key in keys.into_iter() {
-            let key: Key<key::SecretParts, key::UnspecifiedRole> = key.into();
-            let mut keypair = key.clone().into_keypair().unwrap();
-            let hash = HashAlgorithm::default();
-
-            // Sign.
-            let ctx = hash.context().unwrap().for_signature(key.version());
-            let sig = SignatureBuilder::new(SignatureType::Binary)
-                .sign_hash(&mut keypair, ctx).unwrap();
-
-            // Verify.
-            let ctx = hash.context().unwrap().for_signature(key.version());
-            sig.verify_hash(&key, ctx).unwrap();
-        }
-    }
-
-    #[test]
     fn secret_encryption_roundtrip() {
         use crate::types::Curve::*;
         use crate::types::SymmetricAlgorithm::*;

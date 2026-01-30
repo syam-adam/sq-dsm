@@ -2608,6 +2608,8 @@ mod tests {
     use crate::packet::Packet;
     use super::*;
     use crate::parse::Parse;
+    use crate::SignatureType;
+    use crate::crypto::mpi::PublicKey;
 
     #[test]
     fn encrypted_rsa_key() {
@@ -2629,6 +2631,192 @@ mod tests {
                 _ => panic!(),
             }),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn signature_roundtrip() {
+        let gen_v4_rsa = |bits: usize| -> Key<key::SecretParts, key::PrimaryRole> {
+            Key4::generate_rsa(bits)
+                .expect("Can generate a v4 RSA key")
+                .into()
+        };
+        let gen_v6_rsa = |bits: usize| -> Key<_, _> {
+            Key6::generate_rsa(bits)
+                .expect("Can generate a v6 RSA key")
+                .into()
+        };
+        // Disabled: see below.
+        //let gen_v4_dsa = |bits: usize| -> Key<_, _> {
+        //    Key4::generate_dsa(bits)
+        //        .expect("Can generate a v4 DSA key")
+        //        .into()
+        //};
+        let gen_v4_curve = |curve: Curve| -> Key<_, _> {
+            Key4::generate_ecc(true, curve.clone())
+                .expect(&format!("Can generate a v4 {:?}", curve))
+                .into()
+        };
+        let gen_v6_curve = |curve: Curve| -> Key<_, _> {
+            Key6::generate_ecc(true, curve.clone())
+                .expect(&format!("Can generate a v6 {:?}", curve))
+                .into()
+        };
+        let gen_v4_ed25519 = || -> Key<_, _> {
+            Key4::generate_ed25519()
+                .expect("Can generate a v4 Ed25519 key")
+                .into()
+        };
+        let gen_v6_ed25519 = || -> Key<_, _> {
+            Key6::generate_ed25519()
+                .expect("Can generate a v6 Ed25519 key")
+                .into()
+        };
+        let gen_v4_ed448 = || -> Key<_, _> {
+            Key4::generate_ed448()
+                .expect("Can generate a v4 Ed448 key")
+                .into()
+        };
+        let gen_v6_ed448 = || -> Key<_, _> {
+            Key6::generate_ed448()
+                .expect("Can generate a v6 Ed448 key")
+                .into()
+        };
+
+        #[allow(deprecated)]
+        for (algo, curve, profile, gen) in [
+            // RSA
+            (PublicKeyAlgorithm::RSAEncryptSign, None, 4,
+             Box::new(|| gen_v4_rsa(2048)) as Box<dyn Fn () -> _>),
+            (PublicKeyAlgorithm::RSAEncryptSign, None, 4,
+             Box::new(|| gen_v4_rsa(3072)) as Box<dyn Fn () -> _>),
+            (PublicKeyAlgorithm::RSAEncryptSign, None, 4,
+             Box::new(|| gen_v4_rsa(4096)) as Box<dyn Fn () -> _>),
+            (PublicKeyAlgorithm::RSAEncryptSign, None, 6,
+             Box::new(|| gen_v6_rsa(2048))),
+            (PublicKeyAlgorithm::RSAEncryptSign, None, 6,
+             Box::new(|| gen_v6_rsa(3072))),
+            (PublicKeyAlgorithm::RSAEncryptSign, None, 6,
+             Box::new(|| gen_v6_rsa(4096))),
+
+            // DSA
+            //
+            // DSA is deprecated.
+            //
+            // Disabled, because DSA generation doesn't work on
+            // Windows, but PublicKeyAlgorithm::DSA.is_supported()
+            // returns true.  This is because CNG does support signing
+            // and verification.
+            //(PublicKeyAlgorithm::DSA, None, 4,
+            // Box::new(|| gen_v4_dsa(2048)) as Box<dyn Fn () -> _>),
+            //(PublicKeyAlgorithm::DSA, None, 4,
+            // Box::new(|| gen_v4_dsa(3072)) as Box<dyn Fn () -> _>),
+
+            // EdDSA 25519.
+            //
+            // Note: EdDSA Ed25519 is deprecated for v6.
+            (PublicKeyAlgorithm::EdDSA, Some(Curve::Ed25519), 4,
+             Box::new(|| gen_v4_curve(Curve::Ed25519))),
+
+            // Modern Ed25519.
+            (PublicKeyAlgorithm::Ed25519, None, 4,
+             Box::new(gen_v4_ed25519)),
+            (PublicKeyAlgorithm::Ed25519, None, 6,
+             Box::new(gen_v6_ed25519)),
+
+            // Ed448.
+            (PublicKeyAlgorithm::Ed448, None, 4,
+             Box::new(gen_v4_ed448)),
+            (PublicKeyAlgorithm::Ed448, None, 6,
+             Box::new(gen_v6_ed448)),
+
+            // Nist.
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::NistP256), 4,
+             Box::new(|| gen_v4_curve(Curve::NistP256))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::NistP256), 6,
+             Box::new(|| gen_v6_curve(Curve::NistP256))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::NistP384), 4,
+             Box::new(|| gen_v4_curve(Curve::NistP384))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::NistP384), 6,
+             Box::new(|| gen_v6_curve(Curve::NistP384))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::NistP521), 4,
+             Box::new(|| gen_v4_curve(Curve::NistP521))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::NistP521), 6,
+             Box::new(|| gen_v6_curve(Curve::NistP521))),
+
+            // Brainpool.
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::BrainpoolP256), 4,
+             Box::new(|| gen_v4_curve(Curve::BrainpoolP256))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::BrainpoolP256), 6,
+             Box::new(|| gen_v6_curve(Curve::BrainpoolP256))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::BrainpoolP384), 4,
+             Box::new(|| gen_v4_curve(Curve::BrainpoolP384))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::BrainpoolP384), 6,
+             Box::new(|| gen_v6_curve(Curve::BrainpoolP384))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::BrainpoolP512), 4,
+             Box::new(|| gen_v4_curve(Curve::BrainpoolP512))),
+            (PublicKeyAlgorithm::ECDSA, Some(Curve::BrainpoolP512), 6,
+             Box::new(|| gen_v6_curve(Curve::BrainpoolP512))),
+        ]
+        {
+            eprintln!("Checking algo: {}, curve: {:?}, profile: {}.",
+                      algo, curve, profile);
+            if ! algo.is_supported() {
+                eprintln!("Algorithm {} not supported, skipping test.",
+                          algo);
+                continue;
+            }
+
+            if let Some(curve) = curve.as_ref() {
+                if ! curve.is_supported() {
+                    eprintln!("Curve {:?} not supported, skipping test.",
+                              curve);
+                    continue;
+                }
+            }
+
+            let key = gen();
+
+            // Make sure we got the right type of key.
+            assert_eq!(algo, key.pk_algo(),
+                       "\n\
+                        algo expected: {:?} ({})\n\
+                        algo got:      {:?} ({})",
+                       algo, u8::from(algo),
+                       key.pk_algo(), u8::from(key.pk_algo()));
+
+            let got_curve = match key.mpis() {
+                PublicKey::EdDSA { curve, .. }
+                | PublicKey::ECDSA { curve, .. }
+                | PublicKey::ECDH { curve, .. } =>
+                {
+                    Some(curve.clone())
+                }
+                _ => None,
+            };
+            assert_eq!(curve, got_curve,
+                       "\n\
+                        curve expected: {:?}\n\
+                        curve got:      {:?}",
+                       curve, got_curve);
+
+            assert_eq!(profile, key.version(),
+                       "\n\
+                        profile expected: {:?}\n\
+                        profile got:      {:?}",
+                       profile, key.version());
+
+            let mut pair = key.clone().into_keypair().unwrap();
+            let hash = HashAlgorithm::default();
+
+            // Sign.
+            let ctx = hash.context().unwrap().for_signature(profile);
+            let sig = SignatureBuilder::new(SignatureType::Binary)
+                .sign_hash(&mut pair, ctx).unwrap();
+
+            // Verify.
+            let ctx = hash.context().unwrap().for_signature(profile);
+            sig.verify_hash(&key, ctx).unwrap();
         }
     }
 
