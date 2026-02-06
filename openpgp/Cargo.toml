@@ -85,7 +85,7 @@ ocb3 = { version = "0.1", default-features = false, optional = true }
 p256 = { version = "0.13", optional = true, features = ["ecdh", "ecdsa"] }
 p384 = { version = "0.13", optional = true, features = ["ecdh", "ecdsa"] }
 p521 = { version = "0.13", optional = true, features = ["ecdh", "ecdsa"] }
-rand = { version = "0.8", optional = true, default-features = false }
+rand = { version = "0.9", optional = true, default-features = false }
 # As long as we are on x25519-dalek 2.0 we have to use rand_core v0.6.
 rand_core = { version = "0.6", optional = true }
 ripemd = { version = "0.1", features = ["oid"], optional = true }
@@ -109,7 +109,7 @@ lalrpop = { version = "0.20", default-features = false }
 
 [dev-dependencies]
 quickcheck = { version = "1", default-features = false }
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "thread_rng"] }
 rpassword = "7.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 
@@ -129,7 +129,7 @@ crypto-rust = [
     "dep:ocb3",
     "dep:p256",
     "dep:p384", "dep:p521",
-    "dep:rand", "rand?/getrandom", "dep:rand_core", "rand_core?/getrandom",
+    "dep:rand", "rand?/os_rng", "dep:rand_core", "rand_core?/getrandom",
     "dep:ecdsa", "dep:aes-gcm", "dep:dsa", "dep:hkdf",
 ]
 crypto-cng = [

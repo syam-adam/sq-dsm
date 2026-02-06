@@ -3089,7 +3089,7 @@ mod test {
         }
 
         use rand::seq::SliceRandom;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let mut all_versions = (0..=u8::MAX).collect::<Vec<_>>();
         all_versions.shuffle(&mut rng);
