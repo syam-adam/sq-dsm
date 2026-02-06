@@ -26,7 +26,7 @@ sequoia-openpgp = { version = "2", path = "../openpgp", default-features = false
 anyhow = "1.0.18"
 capnp-rpc = "0.25"
 fs2 = "0.4.2"
-lalrpop-util = ">=0.17, <0.21"
+lalrpop-util = ">=0.17, <0.23"
 libc = "0.2.66"
 memsec = { version = ">=0.5", default-features = false }
 tempfile = "3.1"
@@ -41,7 +41,7 @@ winapi = { version = "0.3.8", default-features = false, features = ["winsock2"] 
 ctor = "0.2"
 
 [build-dependencies]
-lalrpop = { version = ">=0.17, <0.21", default-features = false }
+lalrpop = { version = ">=0.17, <0.23", default-features = false }
 capnpc = "0.25"
 
 [dev-dependencies]
