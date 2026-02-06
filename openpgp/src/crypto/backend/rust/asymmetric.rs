@@ -81,9 +81,9 @@ impl Asymmetric for super::Backend {
     fn x25519_generate_key() -> Result<(Protected, [u8; 32])> {
         use x25519_dalek::{StaticSecret, PublicKey};
 
-        // x25519_dalek v1.1 doesn't reexport OsRng.  It
-        // depends on rand 0.8.
-        use rand::rngs::OsRng;
+        // x25519_dalek v2.0 doesn't reexport OsRng.  It
+        // depends on rand_core 0.6.
+        use rand_core::OsRng;
 
         let secret = StaticSecret::random_from_rng(&mut OsRng);
         let public = PublicKey::from(&secret);
@@ -113,7 +113,7 @@ impl Asymmetric for super::Backend {
     }
 
     fn ed25519_generate_key() -> Result<(Protected, [u8; 32])> {
-        use rand::rngs::OsRng as OsRng;
+        use rand_core::OsRng as OsRng;
         let pair = ed25519_dalek::SigningKey::generate(&mut OsRng);
         Ok((pair.to_bytes().into(), pair.verifying_key().to_bytes()))
     }
