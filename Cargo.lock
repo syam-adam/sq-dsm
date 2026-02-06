@@ -2801,7 +2801,6 @@ dependencies = [
  "hyper-util",
  "libc",
  "percent-encoding",
- "rand",
  "reqwest",
  "sequoia-openpgp",
  "tempfile",
