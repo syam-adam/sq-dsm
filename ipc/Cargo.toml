@@ -24,7 +24,7 @@ maintenance = { status = "actively-developed" }
 sequoia-openpgp = { version = "2", path = "../openpgp", default-features = false }
 
 anyhow = "1.0.18"
-capnp-rpc = "0.19"
+capnp-rpc = "0.25"
 fs2 = "0.4.2"
 lalrpop-util = ">=0.17, <0.21"
 libc = "0.2.66"
@@ -43,11 +43,11 @@ ctor = "0.2"
 
 [build-dependencies]
 lalrpop = { version = ">=0.17, <0.21", default-features = false }
-capnpc = "0.19"
+capnpc = "0.25"
 
 [dev-dependencies]
 quickcheck = { version = "1", default-features = false }
-capnp = "0.19"
+capnp = "0.25"
 clap = { version = "4", features = ["derive"] }
 
 [lib]

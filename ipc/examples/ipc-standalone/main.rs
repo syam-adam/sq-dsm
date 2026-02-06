@@ -1,7 +1,10 @@
 use anyhow::Result;
+
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::{twoparty, RpcSystem};
+use capnp::capability::Rc;
+
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
@@ -41,7 +44,7 @@ struct HelloServer {}
 
 impl hello::Server for HelloServer {
     fn hello(
-        &mut self,
+        self: Rc<Self>,
         params: hello::HelloParams,
         mut results: hello::HelloResults,
     ) -> ::capnp::capability::Promise<(), ::capnp::Error> {
