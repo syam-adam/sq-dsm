@@ -2775,7 +2775,6 @@ dependencies = [
  "libc",
  "memsec",
  "quickcheck",
- "rand",
  "sequoia-openpgp",
  "socket2 0.5.10",
  "tempfile",

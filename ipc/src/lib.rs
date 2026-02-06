@@ -62,6 +62,8 @@ use winapi::um::winsock2;
 use std::process::{Command, Stdio};
 use std::thread;
 
+use sequoia_openpgp::crypto::random;
+
 #[macro_use] mod macros;
 pub mod keybox;
 mod keygrip;
@@ -191,7 +193,7 @@ impl Descriptor {
                 self.connect()
             }
         } else {
-            let cookie = Cookie::new();
+            let cookie = Cookie::new()?;
 
             let (addr, external, _join_handle) = match policy {
                 core::IPCPolicy::Internal => self.start(false)?,
@@ -317,7 +319,7 @@ impl Descriptor {
         }
 
         // Create a new cookie.
-        let cookie = Cookie::new();
+        let cookie = Cookie::new()?;
 
         // Start an *internal* server.
         let (addr, _external, join_handle) = self.start(false)?;
@@ -470,17 +472,15 @@ impl Server {
 /// Cookies are used to authenticate clients.
 struct Cookie(Vec<u8>);
 
-use rand::RngCore;
-use rand::rngs::OsRng;
-
 impl Cookie {
     const SIZE: usize = 32;
 
     /// Make a new cookie.
-    fn new() -> Self {
+    fn new() -> Result<Self> {
         let mut c = vec![0; Cookie::SIZE];
-        OsRng.fill_bytes(&mut c);
-        Cookie(c)
+        random(&mut c)
+            .context("Generating authentication token")?;
+        Ok(Cookie(c))
     }
 
     /// Make a new cookie from a slice.
