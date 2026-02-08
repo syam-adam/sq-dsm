@@ -114,10 +114,10 @@ impl Context for KeyWrapper {
         // If necessary, round up to the next block size and pad with zeroes
         // NOTE: In theory CFB doesn't need this but CNG always requires
         // passing full blocks.
-        let mut _src = vec![];
+        let mut _src;
         let missing = (block_size - (src.len() % block_size)) % block_size;
         let src = if missing != 0 {
-            _src = vec![0u8; src.len() + missing];
+            _src = Protected::new(src.len() + missing);
             _src[..src.len()].copy_from_slice(src);
             &_src
         } else {
