@@ -2902,6 +2902,7 @@ dependencies = [
  "winapi",
  "x25519-dalek",
  "xxhash-rust",
+ "zeroize",
 ]
 
 [[package]]
