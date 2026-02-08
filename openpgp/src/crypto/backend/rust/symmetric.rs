@@ -511,11 +511,9 @@ macro_rules! make_mode {
                     // byte key, but in OpenPGP the key is only 16
                     // bytes.
                     assert_eq!(key.len(), 16);
-                    let mut key = key.to_vec();
-                    while key.len() < 56 {
-                        key.push(0);
-                    }
-                    let key = GA::try_from_slice(&key)?;
+                    let mut key_expanded = [0; 56];
+                    key_expanded[..16].copy_from_slice(&key);
+                    let key = GA::try_from_slice(&key_expanded)?;
                     $( let $iv = &GA::try_from_slice(&$iv)?; )?
                     Ok(Box::new($enum::Blowfish(
                         $mode::$mode2::<blowfish::Blowfish>::new(key $(, $iv)?))))
