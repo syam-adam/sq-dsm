@@ -352,7 +352,7 @@ macro_rules! impl_dec_mode {
                 let bs = self.block_size();
                 let missing = (bs - (dst.len() % bs)) % bs;
                 if missing > 0 {
-                    let mut buf = vec![0u8; src.len() + missing];
+                    let mut buf = Protected::new(src.len() + missing);
                     buf[..src.len()].copy_from_slice(src);
                     #[allow(deprecated)]
                     match self {
