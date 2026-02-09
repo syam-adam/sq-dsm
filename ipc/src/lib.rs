@@ -62,7 +62,10 @@ use winapi::um::winsock2;
 use std::process::{Command, Stdio};
 use std::thread;
 
-use sequoia_openpgp::crypto::random;
+use sequoia_openpgp as openpgp;
+use openpgp::crypto::mem::Encrypted;
+use openpgp::crypto::mem::Protected;
+use openpgp::crypto::random;
 
 #[macro_use] mod macros;
 pub mod keybox;
@@ -470,46 +473,45 @@ impl Server {
 }
 
 /// Cookies are used to authenticate clients.
-struct Cookie(Vec<u8>);
+struct Cookie(Encrypted);
 
 impl Cookie {
     const SIZE: usize = 32;
 
     /// Make a new cookie.
     fn new() -> Result<Self> {
-        let mut c = vec![0; Cookie::SIZE];
+        let mut c = Protected::new(Cookie::SIZE);
         random(&mut c)
             .context("Generating authentication token")?;
-        Ok(Cookie(c))
+        Ok(Cookie(Encrypted::new(c)?))
     }
 
     /// Make a new cookie from a slice.
-    fn from(buf: &[u8]) -> Option<Self> {
+    fn from(buf: &[u8]) -> Result<Option<Self>> {
         if buf.len() == Cookie::SIZE {
-            let mut c = Vec::with_capacity(Cookie::SIZE);
-            c.extend_from_slice(buf);
-            Some(Cookie(c))
+            let c = Protected::from(buf);
+            Ok(Some(Cookie(Encrypted::new(c)?)))
         } else {
-            None
+            Ok(None)
         }
     }
 
     /// Given a vector starting with a cookie, extract it and return
     /// the rest.
-    fn extract(mut buf: Vec<u8>) -> Option<(Self, Vec<u8>)> {
+    fn extract(mut buf: Vec<u8>) -> Result<Option<(Self, Vec<u8>)>> {
         if buf.len() >= Cookie::SIZE {
             let r = buf.split_off(Cookie::SIZE);
-            Some((Cookie(buf), r))
+            Ok(Some((Cookie(Encrypted::new(Protected::from(buf))?), r)))
         } else {
-            None
+            Ok(None)
         }
     }
 
     /// Read a cookie from 'from'.
     fn receive<R: Read>(from: &mut R) -> Result<Self> {
-        let mut buf = vec![0; Cookie::SIZE];
+        let mut buf = Protected::new(Cookie::SIZE);
         from.read_exact(&mut buf)?;
-        Ok(Cookie(buf))
+        Ok(Cookie(Encrypted::new(buf)?))
     }
 
     /// Asynchronously read a cookie from 'socket'.
@@ -518,26 +520,27 @@ impl Cookie {
 
         let mut buf = vec![0; Cookie::SIZE];
         socket.read_exact(&mut buf).await?;
-        Ok(Cookie::from(&buf).expect("enough bytes read"))
+        Ok(Cookie::from(&buf)
+           .map_err(|err| {
+               std::io::Error::new(std::io::ErrorKind::Other, err)
+           })?
+           .expect("enough bytes read"))
     }
 
 
     /// Write a cookie to 'to'.
     fn send<W: Write>(&self, to: &mut W) -> io::Result<()> {
-        to.write_all(&self.0)
+        self.0.map(|cookie| to.write_all(cookie))
     }
 }
 
 impl PartialEq for Cookie {
     fn eq(&self, other: &Cookie) -> bool {
-        // First, compare the length.
-        self.0.len() == other.0.len()
-            // The length is not a secret, hence we can use && here.
-            && unsafe {
-                ::memsec::memeq(self.0.as_ptr(),
-                                other.0.as_ptr(),
-                                self.0.len())
-            }
+        self.0.map(|a| {
+            other.0.map(|b| {
+                a == b
+            })
+        })
     }
 }
 
@@ -585,7 +588,7 @@ impl CookieFile {
         let mut content = vec![];
         self.file.read_to_end(&mut content)
             .with_context(|| format!("Opening {}", self.path.display()))?;
-        Ok(Cookie::extract(content))
+        Ok(Cookie::extract(content)?)
     }
 
     /// Writes the specified cookie to the cookie file followed by the
@@ -597,8 +600,10 @@ impl CookieFile {
             .with_context(|| format!("Rewinding {}", self.path.display()))?;
         self.file.set_len(0)
             .with_context(|| format!("Truncating {}", self.path.display()))?;
-        self.file.write_all(&cookie.0)
-            .with_context(|| format!("Updating {}", self.path.display()))?;
+        cookie.0.map(|cookie| {
+            self.file.write_all(cookie)
+                .with_context(|| format!("Updating {}", self.path.display()))
+        })?;
         self.file.write_all(data)
             .with_context(|| format!("Updating {}", self.path.display()))?;
 
