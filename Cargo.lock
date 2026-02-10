@@ -2615,14 +2615,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ntapi"
-version = "0.3.7"
-source = "git+https://github.com/MSxDOS/ntapi?rev=24fc1e47677fc9f6e38e5f154e6011dc9b270da6#24fc1e47677fc9f6e38e5f154e6011dc9b270da6"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "num"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5248,8 +5240,9 @@ checksum = "dd7cf3379ca1aac9eea11fba24fd7e315d621f8dfe35c8d7d2be8b793726e07d"
 
 [[package]]
 name = "win-crypto-ng"
-version = "0.4.0"
-source = "git+https://github.com/emgre/win-crypto-ng?rev=306da1c87fad53b5e51f9e089b04380a5c336de7#306da1c87fad53b5e51f9e089b04380a5c336de7"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99abfb435a71e54ab2971d8d8c32f1a7e006cdbf527f71743b1d45b93517bb92"
 dependencies = [
  "cipher",
  "doc-comment",
@@ -5711,3 +5704,13 @@ dependencies = [
  "quote",
  "syn 2.0.39",
 ]
+
+[[patch.unused]]
+name = "ntapi"
+version = "0.3.7"
+source = "git+https://github.com/MSxDOS/ntapi?rev=24fc1e47677fc9f6e38e5f154e6011dc9b270da6#24fc1e47677fc9f6e38e5f154e6011dc9b270da6"
+
+[[patch.unused]]
+name = "win-crypto-ng"
+version = "0.4.0"
+source = "git+https://github.com/emgre/win-crypto-ng?rev=306da1c87fad53b5e51f9e089b04380a5c336de7#306da1c87fad53b5e51f9e089b04380a5c336de7"

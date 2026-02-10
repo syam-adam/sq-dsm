@@ -61,6 +61,7 @@ impl PrivateKey for LocalPrivateKey {
 
     fn unlock(&mut self, p: &Password) -> Result<Box<dyn Decryptor>> {
         let key = self.key.clone();
+        // key::SecretKeyMaterial::decrypt_in_place now takes a &Key.
         self.key.secret_mut().decrypt_in_place(&key, p)?;
         let keypair = self.key.clone().into_keypair()?;
         Ok(Box::new(keypair))
@@ -232,8 +233,9 @@ impl<'a> DecryptionHelper for Helper<'a> {
         // First, we try those keys that we can use without prompting
         // for a password.
         for pkesk in pkesks {
-            let keyid = pkesk.recipient();
-            if let Some(key) = self.secret_keys.get_mut(&KeyID::from(keyid)) {
+            // PKESK3::recipient() now returns Option<KeyHandle> instead of &KeyID
+            // impl From<Option<KeyHandle>> for KeyID
+            if let Some(key) = self.secret_keys.get_mut(&KeyID::from(pkesk.recipient())) {
                 if let Some(fp) = key.get_unlocked()
                     .and_then(|k|
                               self.try_decrypt(pkesk, sym_algo, k, decrypt))
@@ -251,12 +253,15 @@ impl<'a> DecryptionHelper for Helper<'a> {
                 continue;
             }
 
+            // PKESK3::recipient() now returns Option<KeyHandle> instead of &KeyID
+            // impl From<Option<KeyHandle>> for KeyID
             if let Some(key) = self.secret_keys.get_mut(&KeyID::from(pkesk.recipient())) {
                 let keypair = loop {
                     if let Some(keypair) = key.get_unlocked() {
                         break keypair;
                     }
-
+                    // PKESK3::recipient() now returns Option<KeyHandle> instead of &KeyID
+                    // impl From<Option<KeyHandle>> for KeyID
                     let p = rpassword::read_password_from_tty(Some(
                         &format!(
                             "Enter password to decrypt key {}: ",
@@ -280,6 +285,8 @@ impl<'a> DecryptionHelper for Helper<'a> {
         // Third, we try to decrypt PKESK packets with wildcard
         // recipients using those keys that we can use without
         // prompting for a password.
+        // PKESK3::recipient() now returns Option<KeyHandle> instead of &KeyID
+        // impl From<Option<KeyHandle>> for KeyID
         for pkesk in pkesks.iter().filter(|p| KeyID::from(p.recipient()).is_wildcard()) {
             for key in self.secret_keys.values() {
                 if let Some(fp) = key.get_unlocked()
@@ -293,6 +300,8 @@ impl<'a> DecryptionHelper for Helper<'a> {
 
         // Fourth, we try to decrypt PKESK packets with wildcard
         // recipients using those keys that are encrypted.
+        // PKESK3::recipient() now returns Option<KeyHandle> instead of &KeyID
+        // impl From<Option<KeyHandle>> for KeyID
         for pkesk in pkesks.iter().filter(|p| KeyID::from(p.recipient()).is_wildcard()) {
             // Don't ask the user to decrypt a key if we don't support
             // the algorithm.
@@ -400,12 +409,11 @@ pub fn decrypt_unwrap(config: Config,
     let mut pkesks: Vec<packet::PKESK> = Vec::new();
     let mut skesks: Vec<packet::SKESK> = Vec::new();
     while let PacketParserResult::Some(mut pp) = ppr {
-        let sym_algo_hint = match &pp.packet {
-            Packet::SEIP(SEIP::V2(seip)) => Some(seip.symmetric_algo()),
-            _ => None,
-        };
+        // Packet::AED removed. As per intial logic, all remaining variants are set to None.
+        let sym_algo_hint = None;
 
         match pp.packet {
+            // Packet::AED removed
             Packet::SEIP(_) => {
                 {
                     let mut decrypt = |algo, secret: &SessionKey| {
@@ -414,6 +422,7 @@ pub fn decrypt_unwrap(config: Config,
                     helper.decrypt(&pkesks[..], &skesks[..], sym_algo_hint,
                                    &mut decrypt)?;
                 }
+                // PacketParser::encrypted deprecated, use the negation of PacketParser::processed
                 if !pp.processed() {
                     return Err(
                         openpgp::Error::MissingSessionKey(

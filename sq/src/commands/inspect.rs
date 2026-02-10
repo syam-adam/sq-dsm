@@ -55,6 +55,7 @@ pub fn inspect(m: &clap::ArgMatches, policy: &dyn Policy, output: &mut dyn io::W
             Packet::Literal(_) => {
                 pp.by_ref().take(40).read_to_end(&mut literal_prefix)?;
             },
+            //  Packet::AED removed
             Packet::SEIP(_) => {
                 encrypted = true;
             },
@@ -149,6 +150,8 @@ fn inspect_cert(policy: &dyn Policy,
     for vka in cert.keys().subkeys().with_policy(policy, None) {
         writeln!(output, "         Subkey: {}", vka.key().fingerprint())?;
         inspect_revocation(output, "", vka.revocation_status())?;
+        // ValidKeyAmalgamation::into_key_amalgamation() -> KeyAmalgamation<'a, P, R, R2> removed
+        // ValidKeyAmalgamation::amalgamation() -> &KeyAmalgamation<'a, P, R, R2> added
         inspect_key(policy, output, "", vka.amalgamation().clone().into(),
                     print_certifications)?;
         writeln!(output)?;
@@ -271,6 +274,9 @@ fn inspect_key(policy: &dyn Policy,
             writeln!(output, "{}      Key flags: {}", indent, flags)?;
         }
     }
+    // ** Deprecated functionality - ComponentBundle::certifications.
+    // ComponentBundle::certifications2() -> impl Iterator<Item=&Signature> + Send + Sync
+    // ComponentBundle::certifications2 renamed to ComponentBundle::certifications
     inspect_certifications(output, bundle.certifications(),
                            print_certifications)?;
 

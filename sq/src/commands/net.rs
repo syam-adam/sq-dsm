@@ -60,7 +60,7 @@ pub fn dispatch_keyserver(config: Config, m: &clap::ArgMatches) -> Result<()> {
 
             if let Ok(handle) = handle {
                 let certs = rt.block_on(ks.get(handle))
-                    .context("Failed to retrieve cert")?;
+                    .context("Failed to retrieve certs")?;
 
                 let mut output =
                     config.create_or_stdout_safe(m.value_of("output"))?;

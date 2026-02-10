@@ -109,6 +109,7 @@ pub fn dump<W>(input: &mut (dyn io::Read + Sync + Send),
                 }
                 Some(fields)
             },
+            // Packet::AED removed
             _ => None,
         };
 
@@ -556,6 +557,7 @@ impl PacketDumper {
                                 writeln!(output,
                                          "{}    Unknown image({}): {} bytes", i,
                                          n, data.len())?,
+                            // user_attribute::Image is now marked as non-exhaustive
                             _ => writeln!(output, "Unknown image")?,
                         },
                         Ok(Subpacket::Unknown(n, data)) =>
@@ -566,6 +568,7 @@ impl PacketDumper {
                             writeln!(output,
                                      "{}    Invalid subpacket encoding: {}", i,
                                      e)?,
+                        // user_attribute::Subpacket is now marked as non-exhaustive
                         _ => writeln!(output, "Unknown subpacket")?,
                     }
                 }
@@ -592,6 +595,8 @@ impl PacketDumper {
 
             PKESK(ref p) => {
                 writeln!(output, "{}  Version: {}", i, p.version())?;
+                // PKESK3::recipient() now returns Option<KeyHandle> instead of &KeyID
+                // impl From<Option<KeyHandle>> for KeyID
                 writeln!(output, "{}  Recipient: {}", i, KeyID::from(p.recipient()))?;
                 writeln!(output, "{}  Pk algo: {}", i, p.pk_algo())?;
                 if self.mpis {
@@ -647,14 +652,16 @@ impl PacketDumper {
                                      hex::encode(esk))?;
                         }
                     },
-
+                    // SKESK::V5 removed, SKESK::V6 added
                     self::openpgp::packet::SKESK::V6(ref s) => {
                         writeln!(output, "{}  Symmetric algo: {}", i,
                                  s.symmetric_algo())?;
                         writeln!(output, "{}  AEAD: {}", i,
                                  s.aead_algo())?;
                         write!(output, "{}  S2K: ", i)?;
-                        self.dump_s2k(output, i, s.s2k())?; 
+                        self.dump_s2k(output, i, s.s2k())?;
+                        // aead_digest removed in SKESK6
+                        // esk() & aead_iv() no longer returns Result
                         writeln!(output, "{}  IV: {}", i, hex::encode(s.aead_iv()))?;
                         writeln!(output, "{}  ESK: {}", i, hex::encode(s.esk()))?;
                     },
@@ -674,13 +681,10 @@ impl PacketDumper {
                 writeln!(output, "{}  Computed digest: {}",
                          i, hex::encode(m.computed_digest()))?;
             },
-
+            // Packet::AED removed, Packet::Padding Added
             Padding(ref p) => {
-                writeln!(output, "{}  Value:", i)?;
-                let mut hd = hex::Dumper::new(
-                    &mut output,
-                    self.indentation_for_hexdump(&format!("{}  ", i), 16));
-                hd.write_ascii(p.value())?;
+                 writeln!(output, "{}  Value: {}", i,
+                         String::from_utf8_lossy(p.value()))?;
             },
 
             // openpgp::Packet is non-exhaustive.
@@ -830,8 +834,10 @@ impl PacketDumper {
                 write!(output, "{}    Embedded signature: ", i)?,
             IssuerFingerprint(ref fp) =>
                 write!(output, "{}    Issuer Fingerprint: {}", i, fp)?,
+            // SubpacketValue::PreferredAEADAlgorithms removed
             IntendedRecipient(ref fp) =>
                 write!(output, "{}    Intended Recipient: {}", i, fp)?,
+            // SubpacketValue::AttestedCertifications renamed to SubpacketValue::ApprovedCertificationss
             ApprovedCertifications(digests) => {
                 write!(output, "{}    Attested Certifications:", i)?;
                 if digests.is_empty() {
