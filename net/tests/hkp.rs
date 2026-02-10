@@ -5,8 +5,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, StatusCode};
 use hyper_util::rt::TokioIo;
-use rand::RngCore;
-use rand::rngs::OsRng;
 use std::io::Cursor;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use tokio::net::TcpListener;
@@ -110,9 +108,12 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 ///
 /// Returns the address, a channel to drop() to kill the server, and
 /// the thread handle to join the server thread.
-async fn start_server() -> SocketAddr {
+async fn start_server() -> anyhow::Result<SocketAddr> {
     let (addr, socket) = loop {
-        let port = OsRng.next_u32() as u16;
+        let mut two_bytes = [0; 2];
+        sequoia_openpgp::crypto::random(&mut two_bytes)?;
+        let port: u16 = ((two_bytes[0] as u16) << 8) + (two_bytes[1] as u16);
+
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
         if let Ok(s) = TcpListener::bind(&addr).await {
             break (addr, s);
@@ -135,13 +136,13 @@ async fn start_server() -> SocketAddr {
 
     tokio::spawn(server(socket));
 
-    addr
+    Ok(addr)
 }
 
 #[tokio::test]
 async fn get() -> anyhow::Result<()> {
     // Start server.
-    let addr = start_server().await;
+    let addr = start_server().await?;
 
     let keyserver = KeyServer::new(&format!("hkp://{}", addr))?;
     let keyid: KeyID = ID.parse()?;
@@ -156,7 +157,7 @@ async fn get() -> anyhow::Result<()> {
 #[tokio::test]
 async fn send() -> anyhow::Result<()> {
     // Start server.
-    let addr = start_server().await;
+    let addr = start_server().await?;
     eprintln!("{}", format!("hkp://{}", addr));
     let keyserver =
         KeyServer::new(&format!("hkp://{}", addr))?;

@@ -45,6 +45,47 @@ as such in the documentation.  We invite you to experiment with
 them, but please do expect the semantics and possibly even the
 wire format to evolve.
 
+# Security Notes
+
+## Secrets Leaked to the Heap or Stack
+
+Sequoia makes a best effort to ensure that secrets are wiped when they
+are freed.  This is not easy as data is often copied by helper
+functions, the crypto library, or the compiler, and those copies are
+not wiped when freed.
+
+Sequoia includes some tests to detect leaks.  You can run these as
+follows:
+
+```
+cargo test --no-default-features --features sequoia-openpgp/crypto-openssl -- leak_tests
+```
+
+We consider these leaks to be a low severity security issue, because
+they are hard to exploit in practice.  Specifically, they rely on a
+[heartbleed-style attack](https://en.wikipedia.org/wiki/Heartbleed).
+
+Leaks are also time intensive to debug.  And, they are often
+non-deterministic, depend on the version of the Rust compiler that you
+use, the version of the crypto library that you are using, and how it
+was compiled.  As such, we are unlikely to actively fix them.  That
+said, we appreciate reports with a test similar to the ones already
+present in the leak detector to help catalog the leaks.  See
+[`openpgp/tests/secret-leak-dector.rs`] for details.  We are even more
+thankful for fixes.  That file also contains instructions how to get
+started debugging leaks.
+
+  [`openpgp/tests/secret-leak-dector.rs`]: https://gitlab.com/sequoia-pgp/sequoia/-/blob/main/openpgp/tests/secret-leak-detector.rs
+
+If you are worried about secrets being leaks to your process's heap,
+one option is to change your program's architecture.  Instead of
+having a single protection domain, run the sensitive operation in a
+separate process and use RPC mechanism to communicate.  This will
+prevent a heartbleed-style bug in the primary process from reading out
+any secrets.  Further, you can periodically restart the child process
+to force the operating system to wipe any secret's in that process's
+memory.
+
 # Feature flags
 
 This crate uses *features* to enable or disable optional

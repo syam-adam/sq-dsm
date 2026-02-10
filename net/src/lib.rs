@@ -48,8 +48,6 @@ use reqwest::{
     Url,
 };
 
-use std::fmt;
-
 use sequoia_openpgp::{
     self as openpgp,
     cert::{Cert, CertParser},
@@ -62,7 +60,6 @@ use sequoia_openpgp::{
 #[macro_use] mod macros;
 pub mod dane;
 mod email;
-pub mod pks;
 pub mod updates;
 pub mod wkd;
 
@@ -322,7 +319,7 @@ pub enum Error {
     ProtocolViolation,
     /// Encountered an unexpected low-level http status.
     #[error("server returned status {0}")]
-    HttpStatus(reqwest::StatusCode),
+    HttpStatus(hyper::StatusCode),
     /// A `hyper::error::UrlError` occurred.
     #[error(transparent)]
     UrlError(#[from] url::ParseError),
