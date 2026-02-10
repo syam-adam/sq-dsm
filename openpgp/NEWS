@@ -4,6 +4,16 @@
 #+STARTUP: content hidestars
 
 
+* Changes in 2.2.0
+** Notable changes
+   - Our MSRV is now 1.85.
+
+** New functionality
+   - Key4::import_public_ed448
+   - Key4::import_public_x25519
+   - Key4::import_public_x448
+   - CipherSuite::Cv448
+
 * Changes in 2.1.0
 ** Notable fixes
    - When using the OpenSSL backend, we now check at runtime what AEAD
@@ -12,7 +22,21 @@
      RedHat systems, which caused the memory encryption module to
      abort the process because it relied on OCB being always available.
 
+   - The `aes_key_unwrap` function would panic if passed a ciphertext
+     that was too short.  In a debug build, it would panic due to a
+     subtraction underflow.  In a release build, it would use the
+     small negative quantity to allocate a vector.  Since the
+     allocator expects an unsigned quantity, the negative value would
+     be interpreted as a huge allocation.  The allocator would then
+     fail to allocate the memory and panic.
+
+     An attacker could trigger this panic by sending a victim an
+     encrypted message whose PKESK or SKESK packet has been specially
+     modified.  When the victim decrypts the message, the program
+     would crash.
+
 ** New functionality
+   - AsymmetricAlgorithm::EdDSA
    - crypto::symmetric::Encryptor
    - crypto::symmetric::Decryptor
    - crypto::symmetric::BlockCipherMode

@@ -1,7 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-/// A bitfield.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+//! A variable-sized set of boolean flags.
+
+/// A variable-sized set of boolean flags.
+///
+/// This encodes flags in signature subpackets such as [`Features`]
+/// and [`KeyFlags`].  The `Bitfield` grows to accommodate all bits
+/// that are set, and querying a bit outside the allocated space will
+/// return `false`.  Note that it will not automatically shrink if
+/// clearing a bit would leave trailing bytes to be zero.  To do that,
+/// explicitly call [`Bitfield::canonicalize`].
+///
+///   [`Features`]: crate::types::Features
+///   [`KeyFlags`]: crate::types::KeyFlags
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bitfield {
     raw: Vec<u8>,
 }

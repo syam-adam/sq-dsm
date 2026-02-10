@@ -398,10 +398,15 @@ mod test {
     #[test]
     fn roundtrip() {
         use std::io::Write;
+        use crate::crypto::random;
         use crate::parse::Parse;
         use crate::serialize::stream::*;
 
-        let mut msg = vec![0; rand::random::<usize>() % 1024];
+        let mut two_bytes = [0; 2];
+        random(&mut two_bytes).expect("Have RNG");
+        let size: usize = ((two_bytes[0] as usize) << 8) + (two_bytes[1] as usize);
+
+        let mut msg = vec![0; size % 1024];
         crate::crypto::random(&mut msg).unwrap();
 
         let mut padded = vec![];

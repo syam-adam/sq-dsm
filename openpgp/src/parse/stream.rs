@@ -129,7 +129,10 @@ use crate::{
     packet,
     packet::{Signature, Unknown},
     cert::prelude::*,
-    crypto::SessionKey,
+    crypto::{
+        SessionKey,
+        mem::Protected,
+    },
     policy::Policy,
 };
 use crate::parse::{
@@ -1752,7 +1755,7 @@ pub struct Decryptor<'a, H: VerificationHelper + DecryptionHelper> {
     /// out.  We buffer this here, cursor is the offset of unread
     /// bytes in the buffer.
     buffer_size: usize,
-    reserve: Option<Vec<u8>>,
+    reserve: Option<Protected>,
     cursor: usize,
 
     /// The mode of operation.
@@ -2649,7 +2652,7 @@ impl<'a, H: VerificationHelper + DecryptionHelper> Decryptor<'a, H> {
                    self.cursor);
                 pp.consume(self.cursor);
                 self.cursor = 0;
-                self.reserve = Some(pp.steal_eof()?);
+                self.reserve = Some(Protected::from(pp.steal_eof()?));
 
                 // Process the rest of the packets.
                 let mut ppr = PacketParserResult::Some(pp);

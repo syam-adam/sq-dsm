@@ -74,12 +74,9 @@ pub use crate::crypto::HashAlgorithm;
 pub use crate::crypto::PublicKeyAlgorithm;
 pub use crate::crypto::SymmetricAlgorithm;
 
-/// The OpenPGP compression algorithms as defined in [Section 9.3 of RFC 4880].
+/// The OpenPGP compression algorithms as defined in [Section 9.4 of RFC 9580].
 ///
-///   [Section 9.3 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-9.3
-///
-/// Note: This enum cannot be exhaustively matched to allow future
-/// extensions.
+///   [Section 9.4 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-9.4
 ///
 /// # Examples
 ///
@@ -231,12 +228,9 @@ impl Arbitrary for CompressionAlgorithm {
     }
 }
 
-/// Signature type as defined in [Section 5.2.1 of RFC 4880].
+/// Signature type as defined in [Section 5.2.1 of RFC 9580].
 ///
-///   [Section 5.2.1 of RFC 4880]: https://tools.ietf.org/html/rfc4880#section-5.2.1
-///
-/// Note: This enum cannot be exhaustively matched to allow future
-/// extensions.
+///   [Section 5.2.1 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.1
 ///
 /// # Examples
 ///
