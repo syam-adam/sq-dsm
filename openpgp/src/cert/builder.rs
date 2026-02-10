@@ -67,6 +67,8 @@ pub use key::{
 pub enum CipherSuite {
     /// EdDSA and ECDH over Curve25519 with SHA512 and AES256
     Cv25519,
+    /// EdDSA and ECDH over Curve448 with SHA512 and AES256
+    Cv448,
     /// 3072 bit RSA with SHA512 and AES256
     RSA3k,
     /// EdDSA and ECDH over NIST P-256 with SHA256 and AES256
@@ -96,7 +98,7 @@ impl CipherSuite {
     pub fn variants() -> impl Iterator<Item=CipherSuite> {
         use CipherSuite::*;
 
-        [ Cv25519, RSA3k, P256, P384, P521, RSA2k, RSA4k ]
+        [ Cv25519, Cv448, RSA3k, P256, P384, P521, RSA2k, RSA4k ]
             .into_iter()
     }
 
@@ -131,6 +133,10 @@ impl CipherSuite {
                 check_curve!(Curve::Ed25519);
                 check_pk!(PublicKeyAlgorithm::ECDH);
                 check_curve!(Curve::Cv25519);
+            },
+            Cv448 => {
+                check_pk!(PublicKeyAlgorithm::X448);
+                check_pk!(PublicKeyAlgorithm::Ed448);
             },
             RSA2k | RSA3k | RSA4k => {
                 check_pk!(PublicKeyAlgorithm::RSAEncryptSign);
@@ -177,6 +183,25 @@ impl CipherSuite {
                 Key4::generate_rsa(3072),
             CipherSuite::RSA4k =>
                 Key4::generate_rsa(4096),
+            CipherSuite::Cv448 => {
+                let flags = flags.as_ref();
+                let sign = flags.for_certification() || flags.for_signing()
+                    || flags.for_authentication();
+                let encrypt = flags.for_transport_encryption()
+                    || flags.for_storage_encryption();
+                match (sign, encrypt) {
+                    (true, false) => Key4::generate_ed448(),
+                    (false, true) => Key4::generate_x448(),
+                    (true, true) =>
+                        Err(Error::InvalidOperation(
+                            "Can't use key for encryption and signing".into())
+                            .into()),
+                    (false, false) =>
+                        Err(Error::InvalidOperation(
+                            "No key flags set".into())
+                            .into()),
+                }
+            }
             CipherSuite::Cv25519 | CipherSuite::P256 |
             CipherSuite::P384 | CipherSuite::P521 => {
                 let flags = flags.as_ref();
@@ -245,6 +270,18 @@ impl CipherSuite {
                 Key6::generate_rsa(3072),
             CipherSuite::RSA4k =>
                 Key6::generate_rsa(4096),
+            CipherSuite::Cv448 => match (sign, encrypt) {
+                (true, false) => Key6::generate_ed448(),
+                (false, true) => Key6::generate_x448(),
+                (true, true) =>
+                    Err(Error::InvalidOperation(
+                        "Can't use key for encryption and signing".into())
+                        .into()),
+                (false, false) =>
+                    Err(Error::InvalidOperation(
+                        "No key flags set".into())
+                        .into()),
+            },
             CipherSuite::P256 | CipherSuite::P384 | CipherSuite::P521 => {
                 let curve = match self {
                     CipherSuite::Cv25519 if sign => Curve::Ed25519,
@@ -1780,7 +1817,9 @@ mod tests {
 
     use super::*;
     use crate::Fingerprint;
+    use crate::crypto::mpi::PublicKey;
     use crate::packet::signature::subpacket::{SubpacketTag, SubpacketValue};
+    use crate::types::Curve;
     use crate::types::PublicKeyAlgorithm;
     use crate::parse::Parse;
     use crate::policy::StandardPolicy as P;
@@ -2273,5 +2312,178 @@ mod tests {
         check!(cert.as_tsk().armored(), serialize, 1);
 
         Ok(())
+    }
+
+    #[test]
+    fn check_algos() {
+        for (cipher_suite, profile, algos, curves) in [
+            (CipherSuite::Cv25519,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::EdDSA, PublicKeyAlgorithm::ECDH ][..],
+             &[ Curve::Ed25519, Curve::Cv25519, ][..]),
+            (CipherSuite::Cv25519,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::Ed25519, PublicKeyAlgorithm::X25519 ],
+             &[]),
+
+            (CipherSuite::Cv448,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::Ed448, PublicKeyAlgorithm::X448 ],
+             &[]),
+            (CipherSuite::Cv448,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::Ed448, PublicKeyAlgorithm::X448 ],
+             &[]),
+
+            (CipherSuite::RSA2k,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::RSAEncryptSign ],
+             &[]),
+            (CipherSuite::RSA2k,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::RSAEncryptSign ],
+             &[]),
+
+            (CipherSuite::RSA3k,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::RSAEncryptSign ],
+             &[]),
+            (CipherSuite::RSA3k,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::RSAEncryptSign ],
+             &[]),
+
+            (CipherSuite::RSA4k,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::RSAEncryptSign ],
+             &[]),
+            (CipherSuite::RSA4k,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::RSAEncryptSign ],
+             &[]),
+
+            (CipherSuite::P256,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::ECDSA, PublicKeyAlgorithm::ECDH ],
+             &[ Curve::NistP256 ]),
+            (CipherSuite::P256,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::ECDSA, PublicKeyAlgorithm::ECDH ],
+             &[ Curve::NistP256 ]),
+
+            (CipherSuite::P384,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::ECDSA, PublicKeyAlgorithm::ECDH ],
+             &[ Curve::NistP384 ]),
+            (CipherSuite::P384,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::ECDSA, PublicKeyAlgorithm::ECDH ],
+             &[ Curve::NistP384 ]),
+
+            (CipherSuite::P521,
+             Profile::RFC4880,
+             &[ PublicKeyAlgorithm::ECDSA, PublicKeyAlgorithm::ECDH ],
+             &[ Curve::NistP521 ]),
+            (CipherSuite::P521,
+             Profile::RFC9580,
+             &[ PublicKeyAlgorithm::ECDSA, PublicKeyAlgorithm::ECDH ],
+             &[ Curve::NistP521 ]),
+        ]
+        {
+            eprintln!("Testing that generating {:?}, {:?} results in \
+                       algorithms: {}; curves: {}",
+                      cipher_suite, profile,
+                      algos
+                          .iter()
+                          .map(|a| a.to_string())
+                          .collect::<Vec<_>>()
+                          .join(", "),
+                      if curves.is_empty() {
+                          "none".to_string()
+                      } else {
+                          curves
+                              .iter()
+                              .map(|a| a.to_string())
+                              .collect::<Vec<_>>()
+                              .join(", ")
+                      });
+
+            if let Err(err) = cipher_suite.is_supported() {
+                eprintln!("Skipping, cipher suite is not supported: {}", err);
+                continue;
+            }
+
+            let (cert, _) = CertBuilder::general_purpose(Some("x@example.org"))
+                .set_cipher_suite(cipher_suite)
+                .set_profile(profile)
+                .expect("Profile is supported")
+                .generate()
+                .expect("Cipher suite is supported");
+
+            let mut algos_got = cert.keys()
+                .map(|ka| ka.key().pk_algo())
+                .collect::<Vec<_>>();
+            algos_got.sort();
+            algos_got.dedup();
+
+            let mut algos_expected = algos.to_vec();
+            algos_expected.sort();
+
+            assert_eq!(&algos_expected, &algos_got,
+                       "\n\
+                        algos expected: {}\n\
+                        algos got:      {}",
+                       algos_expected
+                           .iter()
+                           .map(|a| a.to_string())
+                           .collect::<Vec<_>>()
+                           .join(", "),
+                       algos_got
+                           .iter()
+                           .map(|a| a.to_string())
+                           .collect::<Vec<_>>()
+                           .join(", "));
+
+
+            let mut curves_got = cert.keys()
+                .filter_map(|ka| match ka.key().mpis() {
+                    PublicKey::EdDSA { curve, .. }
+                    | PublicKey::ECDSA { curve, .. }
+                    | PublicKey::ECDH { curve, .. } =>
+                    {
+                        Some(curve.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            curves_got.sort();
+            curves_got.dedup();
+
+            let mut curves_expected = curves.to_vec();
+            curves_expected.sort();
+
+            assert_eq!(&curves_expected, &curves_got,
+                       "\n\
+                        curves expected: {}\n\
+                        curves got:      {}",
+                       if curves_expected.is_empty() {
+                           "(none)".to_string()
+                       } else {
+                           curves_expected
+                               .iter()
+                               .map(|a| a.to_string())
+                               .collect::<Vec<_>>()
+                               .join(", ")
+                       },
+                       if curves_got.is_empty() {
+                           "(none)".to_string()
+                       } else {
+                           curves_got
+                               .iter()
+                               .map(|a| a.to_string())
+                               .collect::<Vec<_>>()
+                               .join(", ")
+                       });
+        }
     }
 }

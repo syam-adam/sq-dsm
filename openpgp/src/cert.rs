@@ -5470,7 +5470,7 @@ mod test {
     fn key_revoked() {
         use crate::types::Features;
         use crate::packet::key::Key6;
-        use rand::{thread_rng, Rng, distributions::Open01};
+        use rand::{rng, Rng, distr::Open01};
 
         let p = &P::new();
 
@@ -5537,10 +5537,10 @@ mod test {
             rev1.into()
         ]).unwrap();
 
-        let f1: f32 = thread_rng().sample(Open01);
-        let f2: f32 = thread_rng().sample(Open01);
-        let f3: f32 = thread_rng().sample(Open01);
-        let f4: f32 = thread_rng().sample(Open01);
+        let f1: f32 = rng().sample(Open01);
+        let f2: f32 = rng().sample(Open01);
+        let f3: f32 = rng().sample(Open01);
+        let f4: f32 = rng().sample(Open01);
         let te1 = t1 - time::Duration::new((60. * 60. * 24. * 300.0 * f1) as u64, 0);
         let t12 = t1 + time::Duration::new((60. * 60. * 24. * 300.0 * f2) as u64, 0);
         let t23 = t2 + time::Duration::new((60. * 60. * 24. * 300.0 * f3) as u64, 0);
@@ -6220,6 +6220,7 @@ Pu1xwz57O4zo1VYf6TqHJzVC3OMvMUM2hhdecMUe5x6GorNaj6g=
         use crate::packet::signature;
 
         for cs in &[ CipherSuite::Cv25519,
+                     CipherSuite::Cv448,
                      CipherSuite::P256,
                      CipherSuite::P384,
                      CipherSuite::P521,

@@ -286,7 +286,7 @@ impl Password {
 /// Some encodings strip leading zero-bytes.  This function adds them
 /// back, if necessary.  If the size exceeds `to`, an error is
 /// returned.
-pub(crate) fn pad(value: &[u8], to: usize) -> Result<Cow<[u8]>>
+pub(crate) fn pad(value: &[u8], to: usize) -> Result<Cow<'_, [u8]>>
 {
     match value.len().cmp(&to) {
         Ordering::Equal => Ok(Cow::Borrowed(value)),
@@ -310,7 +310,7 @@ pub(crate) fn pad(value: &[u8], to: usize) -> Result<Cow<[u8]>>
 /// back, if necessary.  If the size exceeds `to`, the value is
 /// returned as-is.
 #[allow(dead_code)]
-pub(crate) fn pad_at_least(value: &[u8], to: usize) -> Cow<[u8]>
+pub(crate) fn pad_at_least(value: &[u8], to: usize) -> Cow<'_, [u8]>
 {
     pad(value, to).unwrap_or(Cow::Borrowed(value))
 }
@@ -321,7 +321,7 @@ pub(crate) fn pad_at_least(value: &[u8], to: usize) -> Cow<[u8]>
 /// back, if necessary.  If the size exceeds `to`, the value is
 /// silently truncated.
 #[allow(dead_code)]
-pub(crate) fn pad_truncating(value: &[u8], to: usize) -> Cow<[u8]>
+pub(crate) fn pad_truncating(value: &[u8], to: usize) -> Cow<'_, [u8]>
 {
     if value.len() == to {
         Cow::Borrowed(value)

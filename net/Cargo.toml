@@ -15,7 +15,7 @@ keywords = ["cryptography", "openpgp", "pgp", "hkp", "keyserver"]
 categories = ["cryptography", "authentication", "email"]
 license = "LGPL-2.0-or-later"
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.85"
 
 [badges]
 gitlab = { repository = "sequoia-pgp/sequoia" }
@@ -27,12 +27,12 @@ sequoia-openpgp = { version = "2", path = "../openpgp", default-features = false
 anyhow = "1.0.18"
 futures-util = "0.3.5"
 http = "1"
-hyper = { version = "0.14.10", features = [ "http1", "http2" ] }
-hyper-tls = "0.5"
+hyper = { version = "1", features = [ "http1", "http2" ] }
+hyper-tls = "0.6"
 libc = "0.2.66"
 percent-encoding = "2.1"
 reqwest = "0.12"
-thiserror = "1.0.2"
+thiserror = ">=1, <3"
 url = "2.1"
 z-base-32 = "0.1.2"
 tokio = { version = "1.13.1", features = [ "macros" ] }
@@ -43,9 +43,8 @@ hickory-resolver = { version = "0.24", features = ["dnssec-openssl"]}
 [dev-dependencies]
 bytes = "1"
 http-body-util = "0.1"
-hyper = { version = "0.14", features = [ "server" ] }
+hyper = { version = "1", features = [ "server" ] }
 hyper-util = { version = "0.1", features = ["full"] }
-rand = { version = "0.8", default-features = false, features = [ "getrandom" ] }
 reqwest = { version = "0.12", features = ["socks"] }
 tempfile = "3.1"
 

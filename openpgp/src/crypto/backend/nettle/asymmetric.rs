@@ -452,12 +452,11 @@ use crate::types::PublicKeyAlgorithm;
 impl<R> Key4<SecretParts, R>
     where R: key::KeyRole,
 {
-    /// Creates a new OpenPGP public key packet for an existing RSA key.
+    /// Creates a new OpenPGP secret key packet for an existing RSA key.
     ///
-    /// The RSA key will use public exponent `e` and modulo `n`. The key will
-    /// have its creation date set to `ctime` or the current time if `None`
-    /// is given.
-    #[allow(clippy::many_single_char_names)]
+    /// The RSA key will use the secret exponent `d`, derived from the
+    /// secret primes `p` and `q`.  The key will have its creation
+    /// date set to `ctime` or the current time if `None` is given.
     pub fn import_secret_rsa<T>(d: &[u8], p: &[u8], q: &[u8], ctime: T)
         -> Result<Self> where T: Into<Option<SystemTime>>
     {

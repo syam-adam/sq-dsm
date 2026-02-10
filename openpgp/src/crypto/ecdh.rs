@@ -326,6 +326,11 @@ pub fn aes_key_unwrap(algo: SymmetricAlgorithm, key: &Protected,
     //   Inputs:  Ciphertext, (n+1) 64-bit values {C0, C1, ..., Cn}, and
     //            Key, K (the KEK).
     //   Outputs: Plaintext, n 64-bit values {P1, P2, ..., Pn}.
+    if ciphertext.len() < 16 {
+        return Err(Error::InvalidArgument(
+            "Ciphertext must be at least 16 bytes".into()).into());
+    }
+
     let n = ciphertext.len() / 8 - 1;
     let mut plaintext = Vec::with_capacity(ciphertext.len() - 8);
 
@@ -589,5 +594,53 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn aes_key_unwrap_underflow() {
+        // The `aes_key_unwrap` function would panic if passed a
+        // ciphertext that was too short.  In a debug build, it would
+        // panic due to a subtraction underflow.  In a release build,
+        // it would use the small negative quantity to allocate a
+        // vector.  Since the allocator expects an unsigned quantity,
+        // the negative value would be interpreted as a huge
+        // allocation.  The allocator would then fail to allocate the
+        // memory and panic.
+        //
+        // The aes_key_unwrap function would panic if passed a
+        // ciphertext that was too short.  In a debug build, it would
+        // panic due to a subtraction underflow.  In a release build,
+        // it would use the wrapped negative quantity to allocate a
+        // vector.  Since the wrapped value is huge, it would fail to
+        // allocate the memory and panic.
+        //
+        // This test checks that short ciphertexts fail with an error
+        // and don't panic.
+
+        use crate::fmt::hex;
+
+        let key = hex::decode("c733a461b6bc6d2d15b3ac95cd02c102")
+            .expect("valid hex");
+        let key = Protected::from(key);
+
+        let ciphertext = hex::decode("\
+54a1b6d2e41fd30b34c83fc384996f7a\
+ca6904149310621e45ad14bd370a6cad\
+72d0a11048adddc856fa57e0240cd2ea")
+            .expect("valid hex");
+
+        let algo = SymmetricAlgorithm::AES128;
+
+        // Yes, this key really decryptes this cipher text.
+        assert!(aes_key_unwrap(algo.clone(), &key, &ciphertext).is_ok());
+
+        for i in 0..ciphertext.len() - 1 {
+            if let Err(err) = aes_key_unwrap(algo.clone(), &key, &ciphertext[..i]) {
+                eprintln!("{}: {}", i, err);
+            } else {
+                panic!("Expected failure for {} bytes of ciphertext, but succeeded",
+                       i);
+            }
+        }
     }
 }

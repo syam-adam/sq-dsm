@@ -5,8 +5,12 @@
 
 use std::{
     alloc::{GlobalAlloc, System, Layout},
+    backtrace::Backtrace,
     collections::HashMap,
     io::{Read, Write},
+    sync::Mutex,
+    sync::atomic::AtomicBool,
+    sync::atomic::Ordering,
 };
 
 use sequoia_openpgp::{
@@ -39,13 +43,50 @@ use sequoia_openpgp::{
 /// secret leaks.
 struct LeakingAllocator;
 
+/// A leak detected at deallocation time.
+struct Leak {
+    addr: usize,
+    size: usize,
+    offset: usize,
+    backtrace: Backtrace,
+}
+
+static LEAKS: Mutex<Vec<Leak>> = Mutex::new(Vec::new());
+
+thread_local!(static IN_DEALLOC: AtomicBool = AtomicBool::new(false));
+
 unsafe impl GlobalAlloc for LeakingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         System.alloc(layout)
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Leaking.
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // Don't do anything that may result in a deallocation as
+        // otherwise we'll recurse.
+
+        if IN_DEALLOC.with(|in_dealloc| in_dealloc.swap(true, Ordering::SeqCst)) {
+            // The deallocator is freeing something, which we don't
+            // need to scan.  Also, don't risk infinite recursion.
+            return;
+        }
+
+        let mem = std::slice::from_raw_parts(ptr, layout.size());
+        if mem.len() >= NEEDLE.len() {
+            for offset in 0..mem.len() - NEEDLE.len() {
+                if &mem[offset..offset+NEEDLE.len()] == NEEDLE {
+                    let mut leaks = LEAKS.lock().unwrap();
+                    leaks.push(Leak {
+                        addr: ptr as usize,
+                        size: layout.size(),
+                        offset,
+                        backtrace: std::backtrace::Backtrace::force_capture(),
+                    });
+                    break;
+                }
+            }
+        }
+
+        IN_DEALLOC.with(|in_dealloc| in_dealloc.store(false, Ordering::SeqCst));
     }
 }
 
@@ -264,6 +305,25 @@ fn main() {
 
 fn scan(name: &str) -> Result<()> {
     let mut found_secret = false;
+
+    let leaks = {
+        let mut leaks = LEAKS.lock().unwrap();
+        std::mem::replace(&mut *leaks, Vec::new())
+    };
+    let leak_count = leaks.len();
+    eprintln!("{} deallocations contained leaked secrets:",
+              leak_count);
+    for (i, leak) in leaks.into_iter().enumerate() {
+        found_secret = true;
+        eprintln!("Deallocation record #{}/{}. Secret leak in allocation \
+                   at {:x} (size: {} bytes), offset: {}",
+                  i + 1, leak_count, leak.addr, leak.size, leak.offset);
+        eprintln!("Backtrace of deallocation:\n{}", leak.backtrace);
+    }
+
+    eprintln!("Scanning all memory for leaked secrets \
+               (not only deallocated memory).");
+
     let mut sink = std::io::stderr();
     for map in Map::iter()? {
         let map = map?;

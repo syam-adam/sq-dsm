@@ -463,6 +463,40 @@ impl<R> Key4<key::PublicParts, R>
             })
     }
 
+    /// Creates an OpenPGP public key packet from existing X25519 key
+    /// material.
+    ///
+    /// The key will have its creation date set to `ctime` or the
+    /// current time if `None` is given.
+    pub fn import_public_x25519<T>(public_key: &[u8], ctime: T)
+                                   -> Result<Self>
+    where
+        T: Into<Option<time::SystemTime>>,
+    {
+        Ok(Key4::new(ctime.into().unwrap_or_else(crate::now),
+                     PublicKeyAlgorithm::X25519,
+                     mpi::PublicKey::X25519 {
+                         u: public_key.try_into()?,
+                     })?)
+    }
+
+    /// Creates an OpenPGP public key packet from existing X448 key
+    /// material.
+    ///
+    /// The key will have its creation date set to `ctime` or the
+    /// current time if `None` is given.
+    pub fn import_public_x448<T>(public_key: &[u8], ctime: T)
+                                 -> Result<Self>
+    where
+        T: Into<Option<time::SystemTime>>,
+    {
+        Ok(Key4::new(ctime.into().unwrap_or_else(crate::now),
+                     PublicKeyAlgorithm::X448,
+                     mpi::PublicKey::X448 {
+                         u: Box::new(public_key.try_into()?),
+                     })?)
+    }
+
     /// Creates an OpenPGP public key packet from existing Ed25519 key
     /// material.
     ///
@@ -481,6 +515,22 @@ impl<R> Key4<key::PublicParts, R>
                 curve: Curve::Ed25519,
                 q: mpi::MPI::new(&point),
             })
+    }
+
+    /// Creates an OpenPGP public key packet from existing Ed448 key
+    /// material.
+    ///
+    /// The key will have its creation date set to `ctime` or the
+    /// current time if `None` is given.
+    pub fn import_public_ed448<T>(public_key: &[u8], ctime: T) -> Result<Self>
+    where
+        T: Into<Option<time::SystemTime>>,
+    {
+        Ok(Key4::new(ctime.into().unwrap_or_else(crate::now),
+                     PublicKeyAlgorithm::Ed448,
+                     mpi::PublicKey::Ed448 {
+                         a: Box::new(public_key.try_into()?),
+                     })?)
     }
 
     /// Creates an OpenPGP public key packet from existing RSA key
@@ -1217,35 +1267,6 @@ mod tests {
 
             assert_eq!(cipher, cipher_);
             assert_eq!(sk, sk_);
-        }
-    }
-
-    #[test]
-    fn signature_roundtrip() {
-        use crate::types::{Curve::*, SignatureType};
-
-        let keys = vec![NistP256, NistP384, NistP521].into_iter()
-            .filter_map(|cv| {
-                Key4::generate_ecc(true, cv).ok()
-            }).chain(vec![1024, 2048, 3072, 4096].into_iter().filter_map(|b| {
-                Key4::generate_rsa(b).ok()
-            })).chain(vec![1024, 2048, 3072].into_iter().filter_map(|b| {
-                Key4::generate_dsa(b).ok()
-            }));
-
-        for key in keys.into_iter() {
-            let key: Key<key::SecretParts, key::UnspecifiedRole> = key.into();
-            let mut keypair = key.clone().into_keypair().unwrap();
-            let hash = HashAlgorithm::default();
-
-            // Sign.
-            let ctx = hash.context().unwrap().for_signature(key.version());
-            let sig = SignatureBuilder::new(SignatureType::Binary)
-                .sign_hash(&mut keypair, ctx).unwrap();
-
-            // Verify.
-            let ctx = hash.context().unwrap().for_signature(key.version());
-            sig.verify_hash(&key, ctx).unwrap();
         }
     }
 
