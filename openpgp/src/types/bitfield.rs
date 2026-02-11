@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-//! A variable-sized set of boolean flags.
-
 /// A variable-sized set of boolean flags.
 ///
 /// This encodes flags in signature subpackets such as [`Features`]
@@ -13,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 ///   [`Features`]: crate::types::Features
 ///   [`KeyFlags`]: crate::types::KeyFlags
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Bitfield {
     raw: Vec<u8>,
 }

@@ -61,7 +61,7 @@ impl Padding {
     }
 
     /// Gets the padding packet's value.
-    pub(crate) fn value(&self) -> &[u8] {
+    pub fn value(&self) -> &[u8] {
         self.value.as_slice()
     }
 }

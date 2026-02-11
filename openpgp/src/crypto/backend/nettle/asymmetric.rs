@@ -503,10 +503,10 @@ impl<R> Key4<SecretParts, R>
                 n: mpi::MPI::new(&key.n()[..]),
             },
             mpi::SecretKeyMaterial::RSA {
-                d: mpi::MPI::new(d).into(),
-                p: mpi::MPI::new(&a[..]).into(),
-                q: mpi::MPI::new(&b[..]).into(),
-                u: mpi::MPI::new(&c[..]).into(),
+                d: d.into(),
+                p: a.into(),
+                q: b.into(),
+                u: c.into(),
             }.into())
     }
 

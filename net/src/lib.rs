@@ -40,7 +40,7 @@
 
 // Re-exports of crates that we use in our API.
 pub use reqwest;
-
+use std::fmt;
 use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
 
 use reqwest::{
@@ -59,6 +59,7 @@ use sequoia_openpgp::{
 
 #[macro_use] mod macros;
 pub mod dane;
+pub mod pks;
 mod email;
 pub mod updates;
 pub mod wkd;

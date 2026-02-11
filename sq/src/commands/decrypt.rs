@@ -96,7 +96,8 @@ impl PrivateKey for RemotePrivateKey {
 struct Helper<'a> {
     vhelper: VHelper<'a>,
     secret_keys: HashMap<KeyID, Box<dyn PrivateKey>>,
-    key_identities: HashMap<KeyID, Arc<Cert>>,
+    // Updated to store Cert, as decrypt() now returns Cert instead of Fingerprint
+    key_identities: HashMap<KeyID, Cert>,
     key_hints: HashMap<KeyID, String>,
     dump_session_key: bool,
     dumper: Option<PacketDumper>,
@@ -110,7 +111,7 @@ impl<'a> Helper<'a> {
            -> Self
     {
         let mut keys: HashMap<KeyID, Box<dyn PrivateKey>> = HashMap::new();
-        let mut identities: HashMap<KeyID, Arc<Cert>> = HashMap::new();
+        let mut identities: HashMap<KeyID, Cert> = HashMap::new();
         let mut hints: HashMap<KeyID, String> = HashMap::new();
         let mut dsm_keys_presecrets = Vec::new();
         for presecret in presecrets {
@@ -143,7 +144,7 @@ impl<'a> Helper<'a> {
                                     panic!("Cert does not contain secret keys and private-key-store option has not been set.");
                                 }
                                 );
-                                identities.insert(id.clone(), Arc::new(tsk.clone()));
+                                identities.insert(id.clone(), tsk.clone());
                                 hints.insert(id, hint.clone());
                             }
                 }
@@ -185,7 +186,7 @@ impl<'a> Helper<'a> {
                 if self.dump_session_key {
                     eprintln!("Session key: {}", hex::encode(&sk));
                 }
-                Some(self.key_identities.get(&keyid).map(|cert| (**cert).clone()))
+                Some(self.key_identities.get(&keyid).cloned())
             },
             None => None,
         }
@@ -212,6 +213,8 @@ impl<'a> VerificationHelper for Helper<'a> {
 }
 
 impl<'a> DecryptionHelper for Helper<'a> {
+    //- DecryptionHelper::decrypt now uses dynamic dispatch for the `decryption` parameter
+    //- DecryptionHelper::decrypt now returns a Result<Option<Cert>>
     #[allow(clippy::if_let_some_result)]
     fn decrypt(&mut self, pkesks: &[PKESK], skesks: &[SKESK],
                 sym_algo: Option<SymmetricAlgorithm>,
@@ -222,8 +225,7 @@ impl<'a> DecryptionHelper for Helper<'a> {
             for pkesk in pkesks {
                 for decryptor in DsmAgent::new_decryptors(dsm_key.0.clone(), &dsm_key.1)? {
                     // TODO: This could be parallelized
-                    if let Some(fp) = self.try_decrypt(pkesk, sym_algo, Box::new(decryptor),
-                    decrypt) {
+                    if let Some(fp) = self.try_decrypt(pkesk, sym_algo, Box::new(decryptor), decrypt) {
                         return Ok(fp);
                     }
                 }
@@ -332,10 +334,7 @@ impl<'a> DecryptionHelper for Helper<'a> {
                     }
                 };
 
-                if let Some(fp) =
-                    self.try_decrypt(pkesk, sym_algo, keypair,
-                                     decrypt)
-                {
+                if let Some(fp) = self.try_decrypt(pkesk, sym_algo, keypair, decrypt) {
                     return Ok(fp);
                 }
             }

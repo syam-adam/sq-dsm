@@ -1,6 +1,5 @@
 use std::fmt;
 use std::ops::{BitAnd, BitOr};
-
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]

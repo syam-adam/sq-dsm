@@ -1,7 +1,7 @@
 use std::{
     fmt,
 };
-
+use serde::{Deserialize, Serialize};
 use crate::{Error, Result};
 
 #[cfg(test)]
@@ -26,7 +26,7 @@ use quickcheck::{Arbitrary, Gen};
 ///
 /// [Section 9.5 of RFC 9580]: https://www.rfc-editor.org/rfc/rfc9580.html#section-9.5
 #[non_exhaustive]
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HashAlgorithm {
     /// Rivest et.al. message digest 5.
     MD5,

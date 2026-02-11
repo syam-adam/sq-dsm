@@ -4,7 +4,6 @@ use std::{
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-
 #[cfg(test)]
 use quickcheck::{Arbitrary, Gen};
 

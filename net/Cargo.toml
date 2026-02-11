@@ -39,12 +39,12 @@ tokio = { version = "1.13.1", features = [ "macros" ] }
 base64 = ">= 0.21, < 0.23"
 hickory-client = "0.24"
 hickory-resolver = { version = "0.24", features = ["dnssec-openssl"]}
-
-[dev-dependencies]
 bytes = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = [ "server" ] }
 hyper-util = { version = "0.1", features = ["full"] }
+
+[dev-dependencies]
+hyper = { version = "1", features = [ "server" ] }
 reqwest = { version = "0.12", features = ["socks"] }
 tempfile = "3.1"
 

@@ -1514,7 +1514,6 @@ impl<'a> Policy for StandardPolicy<'a> {
     fn key(&self, ka: &ValidErasedKeyAmalgamation<key::PublicParts>)
         -> Result<()>
     {
-        use self::AsymmetricAlgorithm::{*, Unknown};
         use crate::types::PublicKeyAlgorithm::{self, *};
         use crate::crypto::mpi::PublicKey;
 

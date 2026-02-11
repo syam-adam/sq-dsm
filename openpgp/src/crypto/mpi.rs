@@ -351,15 +351,6 @@ impl From<&[u8]> for ProtectedMPI {
     }
 }
 
-impl From<&[u8]> for ProtectedMPI {
-    fn from(m: &[u8]) -> Self {
-        let value = Protected::from(MPI::trim_leading_zeros(m));
-        ProtectedMPI {
-            value,
-        }
-    }
-}
-
 impl From<Vec<u8>> for ProtectedMPI {
     fn from(m: Vec<u8>) -> Self {
         let value = Protected::from(MPI::trim_leading_zeros(&m));
@@ -374,16 +365,6 @@ impl From<Box<[u8]>> for ProtectedMPI {
     fn from(m: Box<[u8]>) -> Self {
         let value = Protected::from(MPI::trim_leading_zeros(&m));
         drop(Protected::from(m)); // Erase source.
-        ProtectedMPI {
-            value,
-        }
-    }
-}
-
-impl From<Protected> for ProtectedMPI {
-    fn from(m: Protected) -> Self {
-        let value = Protected::from(MPI::trim_leading_zeros(&m));
-        drop(m); // Erase source.
         ProtectedMPI {
             value,
         }
